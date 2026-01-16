@@ -17,13 +17,25 @@ jobs:
       with:
         node-version: 18
         
-    # --- ĐOẠN ĐÃ SỬA ---
-    # Xóa package-lock.json cũ (của Windows) để tránh lỗi trên Mac
     - name: Install Dependencies
       run: |
         rm -rf package-lock.json node_modules
         npm install
-    # -------------------
+    
+    # --- BƯỚC MỚI: SỬA LỖI THIẾU FILE Package.swift ---
+    - name: Fix Missing Package.swift for CapacitorFirebaseAuthentication
+      run: |
+        echo "Downloading missing Package.swift for @capacitor-firebase/authentication..."
+        # Di chuyển vào thư mục của thư viện
+        cd node_modules/@capacitor-firebase/authentication
+        
+        # Tải file Package.swift từ GitHub chính chủ (nhánh main)
+        curl -O https://raw.githubusercontent.com/capawesome-team/capacitor-firebase/main/packages/authentication/Package.swift
+        
+        # Kiểm tra xem file đã được tải về chưa
+        ls -l Package.swift
+        cat Package.swift | head -n 5
+    # --------------------------------------------------
       
     - name: Build React App
       run: npm run build
@@ -31,55 +43,36 @@ jobs:
     - name: Sync Capacitor
       run: npx cap sync ios
 
-    # --- BƯỚC MỚI THÊM VÀO: TỰ ĐỘNG LINK FILE PLIST ---
     - name: Link GoogleService-Info.plist to Xcode Project
       run: |
-        # 1. Cài thư viện xcodeproj để sửa file project
         gem install xcodeproj
-        
-        # 2. Chạy script Ruby để thêm file vào dự án
         ruby -e '
           require "xcodeproj"
           project_path = "ios/App/App.xcodeproj"
           file_name = "GoogleService-Info.plist"
-          # Đường dẫn thực tế của file trong repo
           file_path = "ios/App/App/GoogleService-Info.plist"
-          
-          # Mở dự án
           project = Xcodeproj::Project.open(project_path)
-          
-          # Tìm nhóm "App" (nơi chứa file)
           group = project.main_group["App"]
-          
-          # Kiểm tra nếu file chưa được link thì mới thêm
           unless group.files.find { |f| f.path == file_name }
             file_ref = group.new_file(file_name)
-            # Thêm vào target đầu tiên (App)
             target = project.targets.first
             target.add_resources([file_ref])
             project.save
-            puts "Đã link thành công #{file_name} vào Xcode Project!"
+            puts "Linked #{file_name} successfully!"
           else
-            puts "#{file_name} đã tồn tại trong project."
+            puts "#{file_name} already exists."
           end
         '
       
     - name: Build Archive (xcodebuild)
       run: |
-        # QUAN TRỌNG: Phải vào thư mục ios/App nơi chứa App.xcodeproj
         cd ios/App
-        
-        # Build bằng Project (SPM) thay vì Workspace (CocoaPods)
-        # CODE_SIGNING_ALLOWED=NO để build không cần chứng chỉ
         xcodebuild -project App.xcodeproj -scheme App -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO clean build
         
     - name: Create IPA manually
       run: |
         mkdir -p Payload
-        # QUAN TRỌNG: Cập nhật đường dẫn file .app (ios/App/build/...)
         cp -r ios/App/build/Build/Products/Release-iphoneos/App.app Payload/
-        
-        # Nén thành file .ipa
         zip -r SplitMoney.ipa Payload
         
     - name: Upload Artifact (IPA)
