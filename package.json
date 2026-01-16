@@ -19,15 +19,15 @@
     "@capacitor/core": "^6.0.0",
     "@capacitor/ios": "^6.0.0",
     "date-fns": "^4.1.0",
-    "firebase": "^11.1.0",
+    "firebase": "^10.14.1",
     "lucide-react": "^0.471.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "uuid": "^11.0.5"
   },
   "devDependencies": {
-    "@capacitor/assets": "^3.0.5",
     "@capacitor/cli": "^6.0.0",
+    "@capacitor/assets": "^3.0.0",
     "@eslint/js": "^9.17.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
@@ -52,13 +52,17 @@
     "directories": {
       "output": "release"
     },
-    "files": [
-      "dist/**/*",
-      "electron-main.js",
-      "package.json"
-    ],
+    "files": ["dist/**/*", "electron-main.js", "package.json"],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "resources/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Split Money"
     }
   }
 }
