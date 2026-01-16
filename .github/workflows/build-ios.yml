@@ -25,18 +25,55 @@ jobs:
       
     - name: Sync Capacitor
       run: npx cap sync ios
+
+    # --- BƯỚC MỚI THÊM VÀO: TỰ ĐỘNG LINK FILE PLIST ---
+    - name: Link GoogleService-Info.plist to Xcode Project
+      run: |
+        # 1. Cài thư viện xcodeproj để sửa file project
+        gem install xcodeproj
+        
+        # 2. Chạy script Ruby để thêm file vào dự án
+        ruby -e '
+          require "xcodeproj"
+          project_path = "ios/App/App.xcodeproj"
+          file_name = "GoogleService-Info.plist"
+          # Đường dẫn thực tế của file trong repo
+          file_path = "ios/App/App/GoogleService-Info.plist"
+          
+          # Mở dự án
+          project = Xcodeproj::Project.open(project_path)
+          
+          # Tìm nhóm "App" (nơi chứa file)
+          group = project.main_group["App"]
+          
+          # Kiểm tra nếu file chưa được link thì mới thêm
+          unless group.files.find { |f| f.path == file_name }
+            file_ref = group.new_file(file_name)
+            # Thêm vào target đầu tiên (App)
+            target = project.targets.first
+            target.add_resources([file_ref])
+            project.save
+            puts "Đã link thành công #{file_name} vào Xcode Project!"
+          else
+            puts "#{file_name} đã tồn tại trong project."
+          end
+        '
       
     - name: Build Archive (xcodebuild)
       run: |
-        cd ios
-        # Build app không cần ký (CODE_SIGNING_ALLOWED=NO)
-        xcodebuild -workspace App.xcworkspace -scheme App -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO clean build
+        # QUAN TRỌNG: Phải vào thư mục ios/App nơi chứa App.xcodeproj
+        cd ios/App
+        
+        # Build bằng Project (SPM) thay vì Workspace (CocoaPods)
+        # CODE_SIGNING_ALLOWED=NO để build không cần chứng chỉ
+        xcodebuild -project App.xcodeproj -scheme App -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO clean build
         
     - name: Create IPA manually
       run: |
         mkdir -p Payload
-        # Copy file .app vào folder Payload
-        cp -r ios/build/Build/Products/Release-iphoneos/App.app Payload/
+        # QUAN TRỌNG: Cập nhật đường dẫn file .app (ios/App/build/...)
+        cp -r ios/App/build/Build/Products/Release-iphoneos/App.app Payload/
+        
         # Nén thành file .ipa
         zip -r SplitMoney.ipa Payload
         

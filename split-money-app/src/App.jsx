@@ -74,12 +74,14 @@ const Avatar = ({ name, size = "md", className = "" }) => {
 };
 
 const ExpenseModal = ({ isOpen, onClose, initialData, onSave, people, showToast }) => {
+    // Thêm trường date vào state form, mặc định là hôm nay
     const [form, setForm] = useState({ description: '', amount: '', date: format(new Date(), 'yyyy-MM-dd'), sharedWith: [], payerId: 'me', type: 'split' });
     const [currentView, setCurrentView] = useState('form'); 
   
     useEffect(() => {
       if (initialData) {
-        setForm({ ...initialData, payerId: initialData.payerId || 'me' });
+        // Khi sửa, lấy ngày từ dữ liệu cũ (chuyển về format yyyy-MM-dd cho input date)
+        setForm({ ...initialData, date: format(new Date(initialData.date), 'yyyy-MM-dd'), payerId: initialData.payerId || 'me' });
       } else {
         setForm({ description: '', amount: '', date: format(new Date(), 'yyyy-MM-dd'), sharedWith: [], payerId: 'me', type: 'split' });
       }
@@ -97,6 +99,7 @@ const ExpenseModal = ({ isOpen, onClose, initialData, onSave, people, showToast 
       if (!form.amount || parseInt(form.amount) === 0) { showToast("Vui lòng nhập số tiền!", "error"); return; }
       if (!form.description.trim()) { showToast("Vui lòng nhập nội dung!", "error"); return; }
       if (form.sharedWith.length === 0) { showToast("Chọn ít nhất 1 người để chia!", "error"); return; }
+      // Lưu form, date đã ở đúng định dạng yyyy-MM-dd
       onSave(form);
     };
   
@@ -108,7 +111,7 @@ const ExpenseModal = ({ isOpen, onClose, initialData, onSave, people, showToast 
   
     return (
       <div className="fixed inset-0 z-[100] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-        <div className="bg-gray-100 md:bg-white w-full max-w-lg md:max-w-2xl h-[78vh] md:h-[66vh] rounded-t-[2rem] md:rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-slide-up md:animate-none relative">
+        <div className="bg-gray-100 md:bg-white w-full max-w-lg md:max-w-2xl h-[85vh] md:h-[70vh] rounded-t-[2rem] md:rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-slide-up md:animate-none relative">
           
           <div className={`flex flex-col h-full transition-transform duration-300 ease-in-out ${currentView === 'form' ? 'translate-x-0' : '-translate-x-full'}`}>
               <div className="px-4 py-4 bg-white border-b flex justify-between items-center shrink-0">
@@ -123,9 +126,19 @@ const ExpenseModal = ({ isOpen, onClose, initialData, onSave, people, showToast 
                           <span className="w-24 font-medium text-gray-500">Số tiền</span>
                           <input type="text" inputMode="numeric" className="flex-1 text-right font-bold text-xl text-blue-600 outline-none placeholder-gray-300" placeholder="0" value={form.amount ? form.amount.replace(/\B(?=(\d{3})+(?!\d))/g, ".") : ''} onChange={e => { const rawValue = e.target.value.replace(/\./g, ''); if (/^\d*$/.test(rawValue)) { setForm({...form, amount: rawValue}); } }} autoFocus />
                       </div>
-                      <div className="p-4 flex items-center">
+                      <div className="p-4 border-b border-gray-100 flex items-center">
                           <span className="w-24 font-medium text-gray-500">Tiêu đề</span>
                           <input className="flex-1 text-right font-medium text-gray-800 outline-none placeholder-gray-300" placeholder="Nhập..." value={form.description} onChange={e => setForm({...form, description: e.target.value})} />
+                      </div>
+                      {/* --- PHẦN THÊM MỚI: CHỌN NGÀY --- */}
+                      <div className="p-4 flex items-center">
+                          <span className="w-24 font-medium text-gray-500">Ngày</span>
+                          <input 
+                            type="date" 
+                            className="flex-1 text-right font-bold text-gray-700 outline-none bg-transparent" 
+                            value={form.date} 
+                            onChange={e => setForm({...form, date: e.target.value})} 
+                          />
                       </div>
                   </div>
   
@@ -174,6 +187,7 @@ const ExpenseModal = ({ isOpen, onClose, initialData, onSave, people, showToast 
               </div>
           </div>
   
+          {/* ... (Phần chọn người trả tiền giữ nguyên code cũ) ... */}
           <div className={`absolute inset-0 bg-gray-100 flex flex-col transition-transform duration-300 ease-in-out ${currentView === 'payer_select' ? 'translate-x-0' : 'translate-x-full'}`}>
               <div className="px-4 py-4 bg-white border-b flex items-center shrink-0 relative">
                   <button onClick={() => setCurrentView('form')} className="absolute left-4 p-2 -ml-2 text-gray-500 hover:bg-gray-100 rounded-full">
@@ -211,6 +225,44 @@ const ExpenseModal = ({ isOpen, onClose, initialData, onSave, people, showToast 
       </div>
     );
 };
+
+const UserProfileModal = ({ isOpen, onClose, user, onLogout }) => {
+  if (!isOpen || !user) return null;
+
+  return (
+    <div className="fixed inset-0 z-[300] bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in" onClick={onClose}>
+      <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-slide-up" onClick={e => e.stopPropagation()}>
+        <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-6 text-white text-center">
+            <div className="w-24 h-24 mx-auto bg-white p-1 rounded-full shadow-lg mb-4">
+                <img src={user.photoURL} alt="User" className="w-full h-full rounded-full object-cover" />
+            </div>
+            <h2 className="text-xl font-bold">{user.displayName}</h2>
+            <p className="text-blue-100 text-sm opacity-80">{user.email}</p>
+        </div>
+        <div className="p-6">
+            <div className="bg-gray-50 rounded-2xl p-4 mb-6 border border-gray-100">
+                <div className="flex justify-between items-center mb-2">
+                    <span className="text-gray-500 text-sm font-bold">UID</span>
+                    <span className="text-gray-400 text-xs font-mono">{user.uid.slice(0, 8)}...</span>
+                </div>
+                <div className="flex justify-between items-center">
+                    <span className="text-gray-500 text-sm font-bold">Trạng thái</span>
+                    <span className="text-emerald-600 bg-emerald-50 px-2 py-0.5 rounded text-xs font-bold flex items-center gap-1">
+                        <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full"></span> Online
+                    </span>
+                </div>
+            </div>
+            <button 
+                onClick={() => { onLogout(); onClose(); }} 
+                className="w-full py-3 rounded-xl bg-red-50 text-red-500 font-bold border border-red-100 hover:bg-red-500 hover:text-white transition-all flex items-center justify-center gap-2"
+            >
+                <LogOut size={18} /> Đăng xuất
+            </button>
+        </div>
+      </div>
+    </div>
+  );
+};
 // -----------------------------------------------------------
 
 export default function App() {
@@ -228,7 +280,8 @@ export default function App() {
   const [newPersonName, setNewPersonName] = useState('');
   const [toast, setToast] = useState(null); 
   const [confirmDialog, setConfirmDialog] = useState({ isOpen: false, message: '', onConfirm: null });
-
+  const [isProfileOpen, setIsProfileOpen] = useState(false);
+  
   // --- HIỆU ỨNG: THEO DÕI ĐĂNG NHẬP ---
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
@@ -438,27 +491,28 @@ const fetchDataFromServer = async (uid) => {
       <Toast message={toast?.message} type={toast?.type} onClose={() => setToast(null)} />
       <ConfirmDialog isOpen={confirmDialog.isOpen} message={confirmDialog.message} title={confirmDialog.title} onConfirm={confirmDialog.onConfirm} onClose={() => setConfirmDialog(prev => ({ ...prev, isOpen: false }))} />
       <ExpenseModal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} initialData={editingExpense} onSave={handleSaveExpense} people={people} showToast={showToast} />
+      
+      {/* --- THÊM COMPONENT USER PROFILE MODAL VÀO ĐÂY --- */}
+      <UserProfileModal isOpen={isProfileOpen} onClose={() => setIsProfileOpen(false)} user={user} onLogout={handleLogout} />
 
-      {/* FLOAT BUTTON */}
-      <button onClick={openAddModal} className="hidden md:flex fixed bottom-10 right-10 w-16 h-16 bg-blue-600 text-white rounded-full shadow-2xl shadow-blue-400 items-center justify-center hover:scale-110 active:scale-95 transition-all z-40 group">
-        <Plus size={32} />
-      </button>
-
+      {/* FLOAT BUTTON ... */}
+      
       {/* SIDEBAR */}
-      <aside className="hidden md:flex fixed top-0 bottom-0 left-0 w-72 flex-col bg-whiteSx border-r border-gray-100 shadow-xl z-20">
+      <aside className="hidden md:flex fixed top-0 bottom-0 left-0 w-72 flex-col bg-white border-r border-gray-100 shadow-xl z-20">
         <div className="p-8 flex items-center gap-3">
           <div className="p-2.5 bg-blue-600 rounded-2xl text-white shadow-lg shadow-blue-200"><Wallet size={28}/></div>
           <h1 className="font-bold text-2xl text-gray-800 tracking-tight">Split Money</h1>
         </div>
         
-        {/* LOGIN INFO (DESKTOP) */}
+        {/* LOGIN INFO (DESKTOP) - CẬP NHẬT PHẦN NÀY */}
         <div className="px-6 mb-4">
            {user ? (
-             <div className="p-4 bg-gray-50 rounded-2xl flex items-center gap-3">
+             // Sửa onClick để mở Profile Modal
+             <div onClick={() => setIsProfileOpen(true)} className="p-4 bg-gray-50 rounded-2xl flex items-center gap-3 cursor-pointer hover:bg-gray-100 transition-colors">
                <img src={user.photoURL} alt="User" className="w-10 h-10 rounded-full border border-gray-200"/>
                <div className="flex-1 min-w-0">
                  <p className="font-bold text-sm text-gray-800 truncate">{user.displayName}</p>
-                 <button onClick={handleLogout} className="text-xs text-red-500 font-bold flex items-center gap-1 hover:underline">Đăng xuất</button>
+                 <span className="text-xs text-gray-500 font-bold">Xem hồ sơ</span>
                </div>
              </div>
            ) : (
@@ -490,8 +544,9 @@ const fetchDataFromServer = async (uid) => {
                     <div className="p-2 bg-white/20 backdrop-blur-md rounded-xl"><Wallet size={20}/></div>
                     <span className="font-bold text-xl tracking-tight">Ví Nhóm</span>
                  </div>
-                 {/* LOGIN BUTTON MOBILE */}
-                 <div onClick={user ? handleLogout : handleLogin} className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10 cursor-pointer overflow-hidden">
+                 {/* LOGIN BUTTON MOBILE - CẬP NHẬT PHẦN NÀY */}
+                 {/* Thay đổi onClick: Nếu đã có user thì mở Profile, chưa có thì Login */}
+                 <div onClick={user ? () => setIsProfileOpen(true) : handleLogin} className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10 cursor-pointer overflow-hidden active:scale-95 transition-transform">
                     {user ? <img src={user.photoURL} className="w-full h-full object-cover"/> : <LogIn size={20}/>}
                  </div>
               </div>
