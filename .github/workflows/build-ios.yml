@@ -17,8 +17,13 @@ jobs:
       with:
         node-version: 18
         
+    # --- ĐOẠN ĐÃ SỬA ---
+    # Xóa package-lock.json cũ (của Windows) để tránh lỗi trên Mac
     - name: Install Dependencies
-      run: npm install
+      run: |
+        rm -rf package-lock.json node_modules
+        npm install
+    # -------------------
       
     - name: Build React App
       run: npm run build
