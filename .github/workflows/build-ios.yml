@@ -22,44 +22,18 @@ jobs:
         rm -rf package-lock.json node_modules
         npm install
     
-    # --- ĐOẠN ĐÃ SỬA: TỰ TẠO FILE Package.swift CHUẨN CAPACITOR 6 ---
-    - name: Create Package.swift for CapacitorFirebaseAuthentication
+    # --- ĐOẠN SỬA ĐỔI: TẢI PACKAGE.SWIFT CHÍNH CHỦ (BẢN V6) ---
+    - name: Download Official Package.swift for CapacitorFirebaseAuthentication
       run: |
-        # Di chuyển vào thư mục plugin
         cd node_modules/@capacitor-firebase/authentication
         
-        # Tạo file Package.swift với nội dung tương thích Capacitor 6
-        cat <<EOF > Package.swift
-        // swift-tools-version: 5.9
-        import PackageDescription
-
-        let package = Package(
-            name: "CapacitorFirebaseAuthentication",
-            platforms: [.iOS(.v13)],
-            products: [
-                .library(
-                    name: "CapacitorFirebaseAuthentication",
-                    targets: ["CapacitorFirebaseAuthentication"])
-            ],
-            dependencies: [
-                .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "6.0.0")
-            ],
-            targets: [
-                .target(
-                    name: "CapacitorFirebaseAuthentication",
-                    dependencies: [
-                        .product(name: "Capacitor", package: "capacitor-swift-pm"),
-                        .product(name: "Cordova", package: "capacitor-swift-pm")
-                    ],
-                    path: "ios/Plugin"
-                )
-            ]
-        )
-        EOF
+        echo "Downloading Package.swift from v6.1.0 tag..."
+        # Tải file từ GitHub của tác giả, phiên bản v6.1.0 (tương thích Cap 6)
+        curl -L -o Package.swift https://raw.githubusercontent.com/capawesome-team/capacitor-firebase/v6.1.0/packages/authentication/Package.swift
         
-        echo "✅ Created Package.swift manually!"
-        cat Package.swift
-    # --------------------------------------------------
+        echo "File content preview:"
+        head -n 10 Package.swift
+    # ----------------------------------------------------------
       
     - name: Build React App
       run: npm run build
@@ -91,6 +65,7 @@ jobs:
     - name: Build Archive (xcodebuild)
       run: |
         cd ios/App
+        # Thêm flag -allowProvisioningUpdates để Xcode tự xử lý profile nếu có thể (dù unsigned)
         xcodebuild -project App.xcodeproj -scheme App -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO clean build
         
     - name: Create IPA manually
