@@ -32,6 +32,8 @@ import {
   Share2,
   QrCode,
   Settings,
+  Eye,
+  EyeOff,
 } from "lucide-react";
 import { v4 as uuidv4 } from "uuid";
 import { format } from "date-fns";
@@ -43,6 +45,10 @@ import {
   createUserWithEmailAndPassword,
   updateProfile,
   sendEmailVerification,
+  sendPasswordResetEmail,
+  updatePassword,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
 } from "firebase/auth";
 import { PushNotifications } from "@capacitor/push-notifications";
 import { Capacitor } from "@capacitor/core";
@@ -497,12 +503,25 @@ const ExpenseModal = ({
     // Validate Custom Split
     if (form.type === "custom") {
       let currentSum = 0;
-      form.sharedWith.forEach((id) => {
-        currentSum += parseInt(form.customShares[id] || 0);
-      });
-      if (form.customShares["me"]) {
-        currentSum += parseInt(form.customShares["me"] || 0);
+      const autoSharedWith = []; // Danh sách người tham gia tự động dựa trên số tiền nhập
+
+      // 1. Quét phần của TÔI
+      const myShare = parseInt(form.customShares["me"] || 0);
+      if (myShare > 0) {
+        currentSum += myShare;
+        // Logic cũ của bạn có thể không push "me" vào sharedWith, tùy cách bạn xử lý backend
+        // Nhưng thường custom thì ta chỉ cần đảm bảo tổng đúng.
       }
+
+      // 2. Quét phần của CÁC THÀNH VIÊN KHÁC
+      people.forEach((p) => {
+        if (p.id === user?.uid) return; // Bỏ qua tôi (đã tính ở trên)
+        const s = parseInt(form.customShares[p.id] || 0);
+        if (s > 0) {
+          currentSum += s;
+          autoSharedWith.push(p.id);
+        }
+      });
 
       if (currentSum !== totalAmount) {
         showToast(
@@ -513,6 +532,10 @@ const ExpenseModal = ({
         );
         return;
       }
+
+      // [FIX 2] Tự động cập nhật danh sách sharedWith dựa trên những ai có tiền > 0
+      // Điều này giúp user không cần phải bấm chọn từng người thủ công
+      form.sharedWith = autoSharedWith;
     }
 
     // Validate Full (Ứng/Vay)
@@ -1108,24 +1131,55 @@ const ExpenseModal = ({
   );
 };
 
-// --- LoginModal ---
 const LoginModal = ({ isOpen, onClose, showToast }) => {
   const [isRegistering, setIsRegistering] = useState(false);
+  const [isForgotPassword, setIsForgotPassword] = useState(false); // [MỚI] Chế độ quên mật khẩu
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
-
+  const [showPassword, setShowPassword] = useState(false);
   useEffect(() => {
     if (!isOpen) {
+      // Reset form
       setEmail("");
       setPassword("");
       setFullName("");
       setError("");
       setIsRegistering(false);
+      setIsForgotPassword(false);
+      setShowPassword(false); // [MỚI] Reset về ẩn
     }
   }, [isOpen]);
+
+  // [MỚI] Hàm xử lý quên mật khẩu
+  const handleResetPassword = async (e) => {
+    e.preventDefault();
+    if (!email) {
+      setError("Vui lòng nhập Email để nhận link đặt lại mật khẩu.");
+      return;
+    }
+    setError("");
+    setIsLoading(true);
+    try {
+      await sendPasswordResetEmail(auth, email);
+      showToast(
+        "Đã gửi email! Vui lòng kiểm tra hộp thư (cả mục Spam).",
+        "success",
+      );
+      setIsForgotPassword(false); // Quay lại màn hình đăng nhập
+    } catch (err) {
+      console.error(err);
+      if (err.code === "auth/user-not-found")
+        setError("Email này chưa được đăng ký.");
+      else if (err.code === "auth/invalid-email")
+        setError("Email không hợp lệ.");
+      else setError("Lỗi: " + err.message);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -1134,19 +1188,27 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
     setError("");
     setIsLoading(true);
 
+    // [FIX IPHONE] 1. Tạo một cái "đồng hồ" đếm ngược 10 giây
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("TIMEOUT")), 10000);
+    });
+
     try {
       if (isRegistering) {
-        const userCredential = await createUserWithEmailAndPassword(
-          auth,
-          email,
-          password,
-        );
+        // --- ĐĂNG KÝ (Kèm cơ chế đua Timeout) ---
+        // Nếu Firebase treo -> timeoutPromise sẽ thắng và báo lỗi sau 10s
+        const userCredential = await Promise.race([
+          createUserWithEmailAndPassword(auth, email, password),
+          timeoutPromise,
+        ]);
+
         const user = userCredential.user;
         if (fullName.trim()) {
           await updateProfile(user, { displayName: fullName });
         }
         await sendEmailVerification(user);
         await signOut(auth);
+
         showToast(
           "Đăng ký thành công! Vui lòng xác thực Email rồi đăng nhập.",
           "success",
@@ -1154,11 +1216,13 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
         setIsRegistering(false);
         setPassword("");
       } else {
-        const userCredential = await signInWithEmailAndPassword(
-          auth,
-          email,
-          password,
-        );
+        // --- ĐĂNG NHẬP (Kèm cơ chế đua Timeout) ---
+        // Nếu Firebase treo -> timeoutPromise sẽ thắng và báo lỗi sau 10s
+        const userCredential = await Promise.race([
+          signInWithEmailAndPassword(auth, email, password),
+          timeoutPromise,
+        ]);
+
         const user = userCredential.user;
         if (!user.emailVerified) {
           await signOut(auth);
@@ -1168,21 +1232,33 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
         onClose();
       }
     } catch (err) {
-      let msg = err.message;
-      if (msg.includes("auth/email-not-verified"))
-        msg = "Bạn chưa xác thực Email! Kiểm tra hộp thư (cả mục Spam).";
-      else if (err.code === "auth/email-already-in-use")
-        msg = "Email này đã đăng ký. Hãy đăng nhập.";
-      else if (err.code === "auth/invalid-email") msg = "Email sai định dạng.";
-      else if (
-        err.code === "auth/user-not-found" ||
-        err.code === "auth/wrong-password" ||
-        err.code === "auth/invalid-credential"
-      )
-        msg = "Sai tài khoản hoặc mật khẩu.";
-      else if (err.code === "auth/weak-password")
-        msg = "Mật khẩu quá yếu (> 6 ký tự).";
-      setError(msg);
+      // [FIX IPHONE] 2. Xử lý lỗi Timeout riêng biệt
+      if (err.message === "TIMEOUT") {
+        setError(
+          "Kết nối quá lâu (Timeout). Vui lòng tắt Wifi bật 4G hoặc thử lại sau.",
+        );
+      } else {
+        // Các lỗi cũ giữ nguyên
+        let msg = err.message;
+        if (msg.includes("auth/email-not-verified"))
+          msg = "Bạn chưa xác thực Email! Kiểm tra hộp thư (cả mục Spam).";
+        else if (err.code === "auth/email-already-in-use")
+          msg = "Email này đã đăng ký. Hãy đăng nhập.";
+        else if (err.code === "auth/invalid-email")
+          msg = "Email sai định dạng.";
+        else if (
+          err.code === "auth/user-not-found" ||
+          err.code === "auth/wrong-password" ||
+          err.code === "auth/invalid-credential"
+        )
+          msg = "Sai tài khoản hoặc mật khẩu.";
+        else if (err.code === "auth/weak-password")
+          msg = "Mật khẩu quá yếu (> 6 ký tự).";
+        else if (err.code === "auth/network-request-failed")
+          msg = "Lỗi kết nối mạng. Hãy kiểm tra đường truyền.";
+
+        setError(msg);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -1202,11 +1278,20 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
         </button>
 
         <h2 className="text-xl font-bold text-center mb-6 text-gray-800">
-          {isRegistering ? "Đăng Ký Tài Khoản" : "Đăng Nhập"}
+          {isForgotPassword
+            ? "Quên Mật Khẩu"
+            : isRegistering
+            ? "Đăng Ký Tài Khoản"
+            : "Đăng Nhập"}
         </h2>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          {isRegistering && (
+        {/* Form dùng chung: Nếu quên mật khẩu thì chạy handleResetPassword, ngược lại chạy handleSubmit */}
+        <form
+          onSubmit={isForgotPassword ? handleResetPassword : handleSubmit}
+          className="flex flex-col gap-4"
+        >
+          {/* Tên hiển thị (Chỉ hiện khi Đăng ký) */}
+          {isRegistering && !isForgotPassword && (
             <div className="relative animate-fade-in">
               <Users
                 className="absolute left-3 top-3 text-gray-400"
@@ -1223,28 +1308,47 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
             </div>
           )}
 
+          {/* Email (Luôn hiện) */}
           <div className="relative">
             <Mail className="absolute left-3 top-3 text-gray-400" size={18} />
             <input
               type="email"
-              placeholder="Email"
+              placeholder={isForgotPassword ? "Nhập email đăng ký..." : "Email"}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
               className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 outline-none"
             />
           </div>
-          <div className="relative">
-            <Lock className="absolute left-3 top-3 text-gray-400" size={18} />
-            <input
-              type="password"
-              placeholder="Mật khẩu"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              className="w-full pl-10 pr-4 py-3 rounded-xl border border-gray-200 focus:border-blue-500 outline-none"
-            />
-          </div>
+
+          {/* Mật khẩu (Ẩn khi Quên mật khẩu) */}
+          {!isForgotPassword && (
+            <div className="relative animate-fade-in">
+              {/* [FIX] Ổ khóa: Căn giữa theo chiều dọc (top-1/2 -translate-y-1/2) */}
+              <Lock
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
+                size={18}
+              />
+
+              <input
+                type={showPassword ? "text" : "password"}
+                placeholder="Mật khẩu"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required={!isForgotPassword}
+                className="w-full pl-10 pr-10 py-3 rounded-xl border border-gray-200 focus:border-blue-500 outline-none transition-all"
+              />
+
+              {/* [FIX] Nút Con mắt: Căn giữa theo chiều dọc (top-1/2 -translate-y-1/2) */}
+              <button
+                type="button"
+                onClick={() => setShowPassword(!showPassword)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 transition-colors flex items-center justify-center p-1"
+              >
+                {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
+          )}
 
           {error && (
             <div className="bg-red-50 text-red-500 text-sm p-3 rounded-lg flex items-center gap-2">
@@ -1256,10 +1360,12 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-blue-200 flex items-center justify-center gap-2"
+            className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-blue-200 flex items-center justify-center gap-2 transition-all"
           >
             {isLoading ? (
               <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : isForgotPassword ? (
+              "Gửi Email Khôi Phục"
             ) : isRegistering ? (
               "Đăng Ký & Gửi Email"
             ) : (
@@ -1268,18 +1374,42 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
           </button>
         </form>
 
-        <p className="mt-6 text-center text-sm text-gray-500">
-          {isRegistering ? "Đã có tài khoản? " : "Chưa có tài khoản? "}
-          <button
-            onClick={() => {
-              setIsRegistering(!isRegistering);
-              setError("");
-            }}
-            className="text-blue-600 font-bold hover:underline"
-          >
-            {isRegistering ? "Đăng nhập ngay" : "Tạo mới"}
-          </button>
-        </p>
+        <div className="mt-6 text-center text-sm text-gray-500 space-y-2">
+          {/* Nút chuyển qua lại Quên mật khẩu */}
+          {!isRegistering && !isForgotPassword && (
+            <button
+              onClick={() => {
+                setIsForgotPassword(true);
+                setError("");
+              }}
+              className="text-gray-500 hover:text-blue-600 underline block w-full mb-2"
+            >
+              Quên mật khẩu?
+            </button>
+          )}
+
+          <p>
+            {isForgotPassword
+              ? "Đã nhớ mật khẩu? "
+              : isRegistering
+              ? "Đã có tài khoản? "
+              : "Chưa có tài khoản? "}
+            <button
+              onClick={() => {
+                if (isForgotPassword) setIsForgotPassword(false);
+                else setIsRegistering(!isRegistering);
+                setError("");
+              }}
+              className="text-blue-600 font-bold hover:underline"
+            >
+              {isForgotPassword
+                ? "Đăng nhập"
+                : isRegistering
+                ? "Đăng nhập ngay"
+                : "Tạo mới"}
+            </button>
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -1287,6 +1417,25 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
 
 const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
   const [uploading, setUploading] = useState(false);
+
+  // States cho đổi mật khẩu
+  const [isChangePassMode, setIsChangePassMode] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState(""); // [MỚI] Mật khẩu cũ
+  const [newPassword, setNewPassword] = useState(""); // [MỚI] Mật khẩu mới
+  const [passLoading, setPassLoading] = useState(false);
+  const [showCurrentPass, setShowCurrentPass] = useState(false);
+  const [showNewPass, setShowNewPass] = useState(false);
+  // Reset state khi đóng mở modal
+  useEffect(() => {
+    if (isOpen) {
+      setIsChangePassMode(false);
+      setNewPassword("");
+      setCurrentPassword("");
+      setPassLoading(false);
+      setShowCurrentPass(false); // [MỚI]
+      setShowNewPass(false); // [MỚI]
+    }
+  }, [isOpen]);
 
   if (!isOpen || !user) return null;
 
@@ -1296,20 +1445,68 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
 
     setUploading(true);
     try {
-      // 1. Upload ảnh lên Firebase Storage: profile_pictures/UID
       const storageRef = ref(storage, `profile_pictures/${user.uid}`);
       await uploadBytes(storageRef, file);
       const url = await getDownloadURL(storageRef);
-
-      // 2. Cập nhật vào Firebase Auth Profile
       await updateProfile(user, { photoURL: url });
-
       showToast("Đã cập nhật ảnh đại diện!", "success");
     } catch (error) {
       console.error(error);
       showToast("Lỗi cập nhật ảnh", "error");
     } finally {
       setUploading(false);
+    }
+  };
+
+  // --- HÀM ĐỔI MẬT KHẨU (LOGIC MỚI) ---
+  const handleChangePassword = async () => {
+    // 1. Validate cơ bản
+    if (!currentPassword) {
+      return showToast("Vui lòng nhập mật khẩu hiện tại", "error");
+    }
+    if (newPassword.length < 6) {
+      return showToast("Mật khẩu mới phải từ 6 ký tự trở lên", "error");
+    }
+    if (currentPassword === newPassword) {
+      return showToast("Mật khẩu mới không được trùng mật khẩu cũ", "error");
+    }
+
+    setPassLoading(true);
+    try {
+      // 2. TẠO CREDENTIAL TỪ MẬT KHẨU CŨ
+      const credential = EmailAuthProvider.credential(
+        user.email,
+        currentPassword,
+      );
+
+      // 3. XÁC THỰC LẠI (Re-authenticate)
+      // Nếu pass cũ sai, hàm này sẽ throw lỗi ngay
+      await reauthenticateWithCredential(user, credential);
+
+      // 4. NẾU ĐÚNG PASS CŨ -> CẬP NHẬT PASS MỚI
+      await updatePassword(user, newPassword);
+
+      showToast("Đổi mật khẩu thành công!", "success");
+
+      // Reset form & đóng mode
+      setIsChangePassMode(false);
+      setNewPassword("");
+      setCurrentPassword("");
+    } catch (error) {
+      console.error(error);
+      // Xử lý các mã lỗi phổ biến
+      if (
+        error.code === "auth/wrong-password" ||
+        error.code === "auth/invalid-credential"
+      ) {
+        showToast("Mật khẩu hiện tại không đúng!", "error");
+      } else if (error.code === "auth/too-many-requests") {
+        showToast("Thử lại quá nhiều lần. Vui lòng đợi chút!", "error");
+      } else {
+        showToast("Lỗi: " + error.message, "error");
+      }
+    } finally {
+      setPassLoading(false);
     }
   };
 
@@ -1322,6 +1519,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
         className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden animate-slide-up"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* HEADER */}
         <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-6 text-white text-center relative">
           <button
             onClick={onClose}
@@ -1331,7 +1529,6 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
           </button>
 
           <div className="relative w-24 h-24 mx-auto mb-4 group cursor-pointer">
-            {/* Vòng tròn Avatar */}
             <div className="w-full h-full rounded-full bg-white p-1 shadow-lg overflow-hidden relative">
               {user.photoURL ? (
                 <img
@@ -1344,8 +1541,6 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
                   {user.email?.charAt(0).toUpperCase()}
                 </div>
               )}
-
-              {/* Overlay khi hover hoặc đang upload */}
               <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                 <Camera size={24} className="text-white" />
               </div>
@@ -1355,8 +1550,6 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
                 </div>
               )}
             </div>
-
-            {/* Input file ẩn */}
             <input
               type="file"
               accept="image/*"
@@ -1372,7 +1565,93 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
           <p className="text-blue-100 text-sm opacity-80">{user.email}</p>
         </div>
 
-        <div className="p-6">
+        {/* BODY */}
+        <div className="p-6 space-y-3">
+          {isChangePassMode ? (
+            <div className="bg-gray-50 p-4 rounded-xl border border-gray-100 animate-fade-in">
+              <p className="text-sm font-bold text-gray-800 mb-3 text-center border-b pb-2">
+                Đổi Mật Khẩu
+              </p>
+
+              {/* Ô nhập mật khẩu CŨ */}
+              <div className="mb-3">
+                <p className="text-xs font-bold text-gray-500 uppercase mb-1">
+                  Mật khẩu hiện tại
+                </p>
+                <div className="relative">
+                  <input
+                    type={showCurrentPass ? "text" : "password"}
+                    placeholder="********"
+                    className="w-full p-2.5 pr-10 rounded-lg border border-gray-200 text-sm focus:border-blue-500 outline-none bg-white"
+                    value={currentPassword}
+                    onChange={(e) => setCurrentPassword(e.target.value)}
+                    autoFocus
+                  />
+                  {/* [FIX] Căn giữa icon */}
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPass(!showCurrentPass)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-1"
+                  >
+                    {showCurrentPass ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              {/* Ô nhập mật khẩu MỚI */}
+              <div className="mb-4">
+                <p className="text-xs font-bold text-gray-500 uppercase mb-1">
+                  Mật khẩu mới
+                </p>
+                <div className="relative">
+                  <input
+                    type={showNewPass ? "text" : "password"}
+                    placeholder="Nhập mật khẩu mới..."
+                    className="w-full p-2.5 pr-10 rounded-lg border border-gray-200 text-sm focus:border-blue-500 outline-none bg-white"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                  />
+                  {/* [FIX] Căn giữa icon */}
+                  <button
+                    type="button"
+                    onClick={() => setShowNewPass(!showNewPass)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-1"
+                  >
+                    {showNewPass ? <EyeOff size={16} /> : <Eye size={16} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setIsChangePassMode(false)}
+                  className="flex-1 py-2 bg-white border border-gray-200 text-gray-600 rounded-lg text-sm font-bold hover:bg-gray-50"
+                  disabled={passLoading}
+                >
+                  Hủy
+                </button>
+                <button
+                  onClick={handleChangePassword}
+                  disabled={passLoading}
+                  className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 flex justify-center items-center shadow-lg shadow-blue-200"
+                >
+                  {passLoading ? (
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  ) : (
+                    "Lưu thay đổi"
+                  )}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setIsChangePassMode(true)}
+              className="w-full py-3 rounded-xl bg-blue-50 text-blue-600 font-bold border border-blue-100 hover:bg-blue-100 transition-all flex items-center justify-center gap-2"
+            >
+              <Lock size={18} /> Đổi mật khẩu
+            </button>
+          )}
+
           <button
             onClick={() => {
               onLogout();
@@ -1713,6 +1992,14 @@ export default function App() {
   const [tempMembers, setTempMembers] = useState([]); // Danh sách người chờ thêm khi tạo nhóm
   const [tempName, setTempName] = useState("");
   const [tempEmail, setTempEmail] = useState("");
+
+  const [isMobileView, setIsMobileView] = useState(window.innerWidth < 768);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobileView(window.innerWidth < 768);
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   // --- THAY THẾ: LOGIC ĐỒNG BỘ REAL-TIME VỚI FIREBASE ---
   // Xóa hoặc comment lại các hàm fetchDataFromServer / saveDataToServer cũ
@@ -2073,14 +2360,29 @@ export default function App() {
 
   // --- AUTH + SYNC ---
   useEffect(() => {
+    // [FIX MOBILE] Tạo bộ đếm 4 giây: Nếu mạng lag hoặc Firebase chưa trả về, tự tắt loading để vào App
+    const safetyTimer = setTimeout(() => {
+      setAuthLoading((prev) => {
+        if (prev) {
+          console.log("Auth timeout - Force loading false");
+          return false;
+        }
+        return prev;
+      });
+    }, 4000);
+
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      clearTimeout(safetyTimer); // Nếu Firebase phản hồi thì xóa timer đi
       setUser(currentUser);
       setAuthLoading(false);
       if (currentUser) {
         fetchDataFromServer(currentUser.uid);
       }
     });
-    return () => unsubscribe();
+    return () => {
+      clearTimeout(safetyTimer);
+      unsubscribe();
+    };
   }, []);
 
   // useEffect(() => {
@@ -2572,14 +2874,68 @@ export default function App() {
     [people, expenses],
   );
 
-  const totalOwedToMe = sortedPeople.reduce((acc, p) => {
-    const d = calculateNetDebt(p.id);
-    return d > 0 ? acc + d : acc;
-  }, 0);
-  const totalIOwe = sortedPeople.reduce((acc, p) => {
-    const d = calculateNetDebt(p.id);
-    return d < 0 ? acc + Math.abs(d) : acc;
-  }, 0);
+  // --- [FIX LOGIC] TÍNH TOÁN SONG PHƯƠNG (GIỐNG GLOBAL DASHBOARD) ---
+  const groupStats = useMemo(() => {
+    if (!user || !groupId) return { net: 0, receivable: 0, payable: 0 };
+
+    let totalRec = 0;
+    let totalPay = 0;
+
+    // Duyệt qua từng thành viên KHÁC trong nhóm
+    people.forEach((p) => {
+      if (p.id === user.uid) return; // Bỏ qua chính mình
+
+      let bilateral = 0; // > 0: Họ nợ mình | < 0: Mình nợ họ
+
+      expenses.forEach((exp) => {
+        const amount = parseFloat(exp.amount);
+        const payerId = exp.payerId === "me" ? user.uid : exp.payerId;
+
+        // Helper tính phần tiền
+        const getShare = (uid) => {
+          if (exp.type === "custom")
+            return parseFloat(exp.customShares?.[uid] || 0);
+          let count = exp.sharedWith.length;
+          if (exp.type === "split") count += 1;
+          return amount / count;
+        };
+
+        // 1. TÔI trả tiền, P tham gia -> P nợ tôi (+)
+        if (payerId === user.uid) {
+          if (exp.sharedWith.includes(p.id) && !exp.settledBy?.includes(p.id)) {
+            bilateral += getShare(p.id);
+          }
+        }
+
+        // 2. P trả tiền, TÔI tham gia -> Tôi nợ P (-)
+        if (payerId === p.id) {
+          if (
+            exp.sharedWith.includes(user.uid) &&
+            !exp.settledBy?.includes(user.uid)
+          ) {
+            bilateral -= getShare(user.uid);
+          }
+        }
+      });
+
+      // Cộng dồn riêng biệt (Không bù trừ)
+      if (bilateral > 0) totalRec += bilateral;
+      if (bilateral < 0) totalPay += Math.abs(bilateral);
+    });
+
+    return {
+      net: totalRec - totalPay,
+      receivable: totalRec,
+      payable: totalPay,
+    };
+  }, [people, expenses, user, groupId]);
+
+  // --- BIẾN HIỂN THỊ (TỰ ĐỘNG SWITCH GIỮA GROUP VÀ GLOBAL) ---
+  const displayNetBalance = groupId ? groupStats.net : globalStats.netWorth;
+  const displayReceivable = groupId
+    ? groupStats.receivable
+    : globalStats.totalOwed;
+  const displayPayable = groupId ? groupStats.payable : globalStats.totalDebt;
 
   const [editingContact, setEditingContact] = useState(null);
 
@@ -3716,1328 +4072,1341 @@ export default function App() {
 
       {/* MAIN CONTENT */}
       <div className="flex-1 flex flex-col h-full md:pl-72 relative">
-        {/* --- MOBILE VIEW (ĐÃ CẬP NHẬT FULL TÍNH NĂNG) --- */}
-        <div className="md:hidden flex flex-col h-full bg-gray-50">
-          {/* 1. HEADER MOBILE (Dynamic: Global hoặc Group) */}
-          <div className="bg-gradient-to-br from-blue-600 to-indigo-700 px-6 pt-10 pb-20 shrink-0 text-white shadow-md z-20 rounded-b-[2rem] relative overflow-hidden">
-            {/* Background Decor */}
-            <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
+        {/* --- MOBILE VIEW --- */}
+        {/* Chỉ render khi là Mobile */}
+        {isMobileView && (
+          <div className="md:hidden flex flex-col h-full bg-gray-50">
+            {/* 1. HEADER MOBILE (Dynamic: Global hoặc Group) */}
+            <div className="bg-gradient-to-br from-blue-600 to-indigo-700 px-6 pt-10 pb-20 shrink-0 text-white shadow-md z-20 rounded-b-[2rem] relative overflow-hidden">
+              {/* Background Decor */}
+              <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
 
-            <div className="flex justify-between items-center mb-6 relative z-10">
-              <div className="flex items-center gap-3">
-                {/* Nếu đang trong nhóm -> Hiện nút Back ra Global */}
-                {groupId ? (
-                  <button
-                    onClick={() => {
-                      setGroupId("");
-                      setIsGroupMode(false);
-                      setActiveTab("dashboard");
-                    }}
-                    className="p-2 bg-white/20 backdrop-blur-md rounded-xl hover:bg-white/30 transition-colors"
-                  >
-                    <ChevronLeft size={20} />
-                  </button>
-                ) : (
-                  <div className="p-2 bg-white/20 backdrop-blur-md rounded-xl">
-                    <Wallet size={20} />
-                  </div>
-                )}
+              <div className="flex justify-between items-center mb-6 relative z-10">
+                <div className="flex items-center gap-3">
+                  {/* Nếu đang trong nhóm -> Hiện nút Back ra Global */}
+                  {groupId ? (
+                    <button
+                      onClick={() => {
+                        setGroupId("");
+                        setIsGroupMode(false);
+                        setActiveTab("dashboard");
+                      }}
+                      className="p-2 bg-white/20 backdrop-blur-md rounded-xl hover:bg-white/30 transition-colors"
+                    >
+                      <ChevronLeft size={20} />
+                    </button>
+                  ) : (
+                    <div className="p-2 bg-white/20 backdrop-blur-md rounded-xl">
+                      <Wallet size={20} />
+                    </div>
+                  )}
 
-                <div className="flex flex-col">
-                  <span className="font-bold text-xl tracking-tight leading-none">
-                    {groupId
-                      ? myGroups.find((g) => g.id === groupId)?.name
-                      : "Ví Nhóm"}
-                  </span>
-                  {groupId && (
-                    <span className="text-[10px] opacity-70 font-mono">
-                      ID: {groupId}
+                  <div className="flex flex-col">
+                    <span className="font-bold text-xl tracking-tight leading-none">
+                      {groupId
+                        ? myGroups.find((g) => g.id === groupId)?.name
+                        : "Ví Nhóm"}
                     </span>
+                    {groupId && (
+                      <span className="text-[10px] opacity-70 font-mono">
+                        ID: {groupId}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {/* Avatar User (Góc phải) */}
+                <div
+                  onClick={
+                    user
+                      ? () => setIsProfileOpen(true)
+                      : () => setIsLoginModalOpen(true)
+                  }
+                  className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10 cursor-pointer overflow-hidden active:scale-95 transition-transform"
+                >
+                  {user ? (
+                    user.photoURL ? (
+                      <img
+                        src={user.photoURL}
+                        className="w-full h-full object-cover"
+                        alt="avt"
+                      />
+                    ) : (
+                      <span className="font-bold text-lg">
+                        {user.email?.charAt(0).toUpperCase()}
+                      </span>
+                    )
+                  ) : (
+                    <LogIn size={20} />
                   )}
                 </div>
               </div>
-
-              {/* Avatar User (Góc phải) */}
-              <div
-                onClick={
-                  user
-                    ? () => setIsProfileOpen(true)
-                    : () => setIsLoginModalOpen(true)
-                }
-                className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10 cursor-pointer overflow-hidden active:scale-95 transition-transform"
-              >
-                {user ? (
-                  user.photoURL ? (
-                    <img
-                      src={user.photoURL}
-                      className="w-full h-full object-cover"
-                      alt="avt"
-                    />
-                  ) : (
-                    <span className="font-bold text-lg">
-                      {user.email?.charAt(0).toUpperCase()}
-                    </span>
-                  )
-                ) : (
-                  <LogIn size={20} />
-                )}
-              </div>
+              {/* HEADER STATS MOBILE (Chỉ hiện ở Tab Dashboard) */}
+              {activeTab === "dashboard" && (
+                <div className="relative z-10 animate-fade-in mt-2">
+                  <p className="text-blue-100 text-xs font-bold uppercase tracking-wider opacity-80">
+                    {groupId ? "Tài sản ròng (Nhóm này)" : "Tổng tài sản ròng"}
+                  </p>
+                  <h2
+                    className="font-bold mt-1 tracking-tighter truncate"
+                    // Logic chỉnh size chữ động: Dài quá thì giảm size
+                    style={{
+                      fontSize:
+                        displayNetBalance.toString().length > 9
+                          ? "2rem"
+                          : "2.5rem",
+                    }}
+                  >
+                    {/* [FIX] Dùng biến displayNetBalance mới */}
+                    {formatCompactCurrency(displayNetBalance)}
+                  </h2>
+                  {/* Hiển thị số nhỏ chi tiết bên dưới nếu cần thiết */}
+                  <p className="text-blue-200 text-xs font-mono opacity-60 truncate">
+                    {/* [FIX] Dùng biến displayNetBalance mới */}
+                    {formatCurrency(displayNetBalance)}
+                  </p>
+                </div>
+              )}
             </div>
-            {/* HEADER STATS MOBILE (Chỉ hiện ở Tab Dashboard) */}
-            {activeTab === "dashboard" && (
-              <div className="relative z-10 animate-fade-in mt-2">
-                <p className="text-blue-100 text-xs font-bold uppercase tracking-wider opacity-80">
-                  {groupId ? "Tài sản ròng (Nhóm này)" : "Tổng tài sản ròng"}
-                </p>
-                <h2
-                  className="font-bold mt-1 tracking-tighter truncate"
-                  // Logic chỉnh size chữ động: Dài quá thì giảm size
-                  style={{
-                    fontSize:
-                      (totalOwedToMe - totalIOwe).toString().length > 9
-                        ? "2rem"
-                        : "2.5rem",
-                  }}
-                >
-                  {/* Sử dụng hàm rút gọn cho Mobile luôn cho gọn */}
-                  {groupId
-                    ? formatCompactCurrency(totalOwedToMe - totalIOwe)
-                    : formatCompactCurrency(globalStats.netWorth)}
-                </h2>
-                {/* Hiển thị số nhỏ chi tiết bên dưới nếu cần thiết */}
-                <p className="text-blue-200 text-xs font-mono opacity-60 truncate">
-                  {groupId
-                    ? formatCurrency(totalOwedToMe - totalIOwe)
-                    : formatCurrency(globalStats.netWorth)}
-                </p>
-              </div>
-            )}
-          </div>
 
-          {/* 2. BODY CONTENT (Đẩy lên đè vào Header) */}
-          <div className="flex-1 flex flex-col min-h-0 -mt-12 z-30 px-4 pb-24 overflow-hidden">
-            {/* ========================================================
+            {/* 2. BODY CONTENT (Đẩy lên đè vào Header) */}
+            <div className="flex-1 flex flex-col min-h-0 -mt-12 z-30 px-4 pb-24 overflow-hidden">
+              {/* ========================================================
                 TRƯỜNG HỢP 1: GLOBAL VIEW (KHÔNG CÓ GROUP)
                 ======================================================== */}
-            {!groupId ? (
-              activeTab === "people" ? (
-                // >>> 1.1 GLOBAL: DANH BẠ BẠN BÈ <<<
-                <div className="bg-white rounded-[2rem] shadow-lg h-full flex flex-col overflow-hidden animate-slide-up">
-                  <div className="p-6 border-b border-gray-100">
-                    <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                      <Users className="text-blue-600" size={20} /> Danh bạ của
-                      tôi
-                    </h3>
-                  </div>
-
-                  <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                    {/* Form thêm bạn nhanh */}
-                    <div className="bg-blue-50 p-4 rounded-2xl mb-4 border border-blue-100">
-                      <p className="text-xs font-bold text-blue-800 mb-2 uppercase">
-                        Thêm liên hệ mới
-                      </p>
-
-                      {/* --- SỬA DÒNG NÀY --- */}
-                      <div className="flex flex-col gap-3 mb-3">
-                        {" "}
-                        {/* Đổi thành flex-col để xếp dọc */}
-                        <input
-                          value={newPersonName}
-                          onChange={(e) => setNewPersonName(e.target.value)}
-                          placeholder="Tên (VD: GDragon)"
-                          className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none" // Tăng padding lên p-3 cho dễ bấm
-                        />
-                        <input
-                          value={newPersonEmail}
-                          onChange={(e) => setNewPersonEmail(e.target.value)}
-                          placeholder="Email (để Buzz)..."
-                          className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none"
-                        />
-                      </div>
-                      {/* ------------------- */}
-
-                      <button
-                        onClick={addToContacts}
-                        className="w-full py-3 bg-blue-600 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-transform"
-                      >
-                        + Thêm vào danh bạ
-                      </button>
-                    </div>
-
-                    {/* List Contacts */}
-                    <div className="space-y-3">
-                      {contacts.length === 0 ? (
-                        <p className="text-center text-gray-400 text-sm italic mt-10">
-                          Danh bạ trống
-                        </p>
-                      ) : (
-                        contacts.map((c) => (
-                          <div
-                            key={c.id}
-                            className="flex items-center gap-3 p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-blue-200 transition-all group"
-                          >
-                            <Avatar name={c.name} size="md" />
-                            <div className="flex-1 min-w-0">
-                              <p className="font-bold text-gray-800 text-sm truncate">
-                                {c.name}
-                              </p>
-                              {c.email ? (
-                                <p className="text-xs text-gray-400 truncate">
-                                  {c.email}
-                                </p>
-                              ) : (
-                                <p className="text-[10px] text-orange-400 italic">
-                                  Chưa có email
-                                </p>
-                              )}
-                            </div>
-                            {/* Nút Sửa (MỚI) */}
-                            <button
-                              onClick={() => setEditingContact(c)}
-                              className="p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm border border-gray-100"
-                            >
-                              <Edit2 size={16} />
-                            </button>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </div>
-              ) : (
-                // >>> 1.2 GLOBAL: DASHBOARD TỔNG QUAN <<<
-                <div className="flex flex-col gap-4 h-full overflow-y-auto custom-scrollbar pt-2 pb-4">
-                  {/* List Nhóm (Card ngang - SWIPE TO ACTION) */}
-                  <div className="bg-white p-4 rounded-[2rem] shadow-sm">
-                    <div className="flex justify-between items-center mb-3">
-                      <h3 className="font-bold text-gray-700 text-sm uppercase">
-                        Nhóm của tôi
+              {!groupId ? (
+                activeTab === "people" ? (
+                  // >>> 1.1 GLOBAL: DANH BẠ BẠN BÈ <<<
+                  <div className="bg-white rounded-[2rem] shadow-lg h-full flex flex-col overflow-hidden animate-slide-up">
+                    <div className="p-6 border-b border-gray-100">
+                      <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
+                        <Users className="text-blue-600" size={20} /> Danh bạ
+                        của tôi
                       </h3>
-                      <button
-                        onClick={() => setIsCreateGroupModalOpen(true)}
-                        className="text-blue-600 bg-blue-50 p-1.5 rounded-lg"
-                      >
-                        <Plus size={16} />
-                      </button>
                     </div>
 
-                    {myGroups.length === 0 ? (
-                      <div className="text-center py-6 text-gray-400 text-xs italic border-2 border-dashed border-gray-100 rounded-xl">
-                        Chưa có nhóm nào.
+                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                      {/* Form thêm bạn nhanh */}
+                      <div className="bg-blue-50 p-4 rounded-2xl mb-4 border border-blue-100">
+                        <p className="text-xs font-bold text-blue-800 mb-2 uppercase">
+                          Thêm liên hệ mới
+                        </p>
+
+                        {/* --- SỬA DÒNG NÀY --- */}
+                        <div className="flex flex-col gap-3 mb-3">
+                          {" "}
+                          {/* Đổi thành flex-col để xếp dọc */}
+                          <input
+                            value={newPersonName}
+                            onChange={(e) => setNewPersonName(e.target.value)}
+                            placeholder="Tên (VD: GDragon)"
+                            className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none" // Tăng padding lên p-3 cho dễ bấm
+                          />
+                          <input
+                            value={newPersonEmail}
+                            onChange={(e) => setNewPersonEmail(e.target.value)}
+                            placeholder="Email (để Buzz)..."
+                            className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none"
+                          />
+                        </div>
+                        {/* ------------------- */}
+
+                        <button
+                          onClick={addToContacts}
+                          className="w-full py-3 bg-blue-600 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-transform"
+                        >
+                          + Thêm vào danh bạ
+                        </button>
                       </div>
-                    ) : (
+
+                      {/* List Contacts */}
                       <div className="space-y-3">
-                        {myGroups.map((g) => (
-                          // Container vuốt ngang (Scroll Snap)
-                          <div
-                            key={g.id}
-                            className="flex w-full overflow-x-auto snap-x snap-mandatory [&::-webkit-scrollbar]:hidden rounded-2xl bg-gray-50 shadow-sm border border-gray-100"
-                          >
-                            {/* 1. NỘI DUNG CHÍNH (Snap Center) */}
-                            <div
-                              onClick={() => {
-                                setGroupId(g.id);
-                                setIsGroupMode(true);
-                                setActiveTab("dashboard");
-                              }}
-                              className="min-w-full snap-center flex items-center gap-3 p-3 active:bg-blue-50 transition-colors bg-white"
-                            >
-                              <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center font-bold shrink-0">
-                                {/* [FIX 4] Thêm logic hiển thị icon */}
-                                {g.icon
-                                  ? g.icon
-                                  : g.name?.charAt(0).toUpperCase()}
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <p className="font-bold text-gray-800 text-sm truncate">
-                                  {g.name}
-                                </p>
-                                <p className="text-[10px] text-gray-400 font-mono">
-                                  ID: {g.id}
-                                </p>
-                              </div>
-                              {/* Mũi tên gợi ý vuốt */}
-                              <div className="text-gray-300 animate-pulse pl-2">
-                                <ChevronLeft size={16} strokeWidth={3} />
-                              </div>
-                            </div>
-
-                            {/* 2. CÁC NÚT HÀNH ĐỘNG (Ẩn bên phải - Vuốt ra sẽ thấy) */}
-                            <div className="flex snap-center shrink-0">
-                              <button
-                                onClick={() => openRenameModal(g)}
-                                className="w-14 bg-yellow-400 text-yellow-900 font-bold text-[10px] flex flex-col items-center justify-center gap-1 active:bg-yellow-500"
-                              >
-                                <Edit2 size={16} /> Sửa
-                              </button>
-                              <button
-                                onClick={() => handleDeleteGroup(g.id)}
-                                className="w-14 bg-red-500 text-white font-bold text-[10px] flex flex-col items-center justify-center gap-1 active:bg-red-600 rounded-r-2xl"
-                              >
-                                <Trash2 size={16} /> Xóa
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Global Debts */}
-                  <div className="bg-white p-4 rounded-[2rem] shadow-sm flex-1">
-                    <h3 className="font-bold text-gray-700 text-sm uppercase mb-3">
-                      Chi tiết công nợ (Tất cả)
-                    </h3>
-                    <div className="space-y-3">
-                      {globalFriendStats.length === 0 ? (
-                        <p className="text-center text-gray-400 text-xs italic">
-                          Không có công nợ.
-                        </p>
-                      ) : (
-                        globalFriendStats.map((item, idx) => (
-                          <div
-                            key={idx}
-                            className="flex justify-between items-center p-2 border-b border-gray-50 last:border-0"
-                          >
-                            <div className="flex items-center gap-3">
-                              <Avatar name={item.name} size="sm" />
-                              <span className="font-bold text-sm text-gray-700">
-                                {item.name}
-                              </span>
-                            </div>
-                            <span
-                              className={`font-bold text-sm ${
-                                item.amount >= 0
-                                  ? "text-emerald-600"
-                                  : "text-rose-600"
-                              }`}
-                            >
-                              {item.amount >= 0 ? "+" : ""}
-                              {formatCurrency(item.amount)}
-                            </span>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )
-            ) : /* ========================================================
-                  TRƯỜNG HỢP 2: GROUP VIEW (KHI ĐÃ CHỌN NHÓM)
-                  ======================================================== */
-            activeTab === "people" ? (
-              // >>> 2.1 GROUP: QUẢN LÝ THÀNH VIÊN (CHỌN TỪ DANH BẠ) <<<
-              <div className="bg-white rounded-[2rem] shadow-lg h-full flex flex-col overflow-hidden animate-slide-up">
-                <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-                  <h3 className="font-bold text-gray-800 text-lg">
-                    Thành viên ({people.length})
-                  </h3>
-                  <button
-                    onClick={() => {
-                      // Nút thoát nhóm nhỏ
-                      setGroupId("");
-                      setIsGroupMode(false);
-                    }}
-                    className="text-xs text-red-500 font-bold bg-red-50 px-3 py-1.5 rounded-lg"
-                  >
-                    Thoát
-                  </button>
-                </div>
-
-                <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                  {/* Khu vực thêm từ danh bạ */}
-                  <div className="bg-indigo-50 p-4 rounded-2xl mb-6 border border-indigo-100">
-                    <p className="text-xs font-bold text-indigo-800 mb-3 uppercase flex items-center gap-1">
-                      <Plus size={14} /> Thêm từ danh bạ
-                    </p>
-
-                    {contacts.length === 0 ? (
-                      <p className="text-xs text-center text-gray-400 italic bg-white/50 p-2 rounded-lg">
-                        Danh bạ trống. Ra trang chủ để thêm.
-                      </p>
-                    ) : (
-                      <div className="flex flex-wrap gap-2">
-                        {contacts.filter(
-                          (c) => !people.some((p) => p.id === c.id),
-                        ).length === 0 && (
-                          <p className="text-xs text-gray-400 w-full text-center">
-                            Đã thêm hết bạn bè.
-                          </p>
-                        )}
-
-                        {contacts
-                          .filter((c) => !people.some((p) => p.id === c.id))
-                          .map((c) => (
-                            <button
-                              key={c.id}
-                              onClick={() => addContactToGroup(c)}
-                              className="flex items-center gap-1 px-3 py-2 bg-white rounded-xl border border-indigo-200 text-xs font-bold text-gray-700 shadow-sm active:scale-95"
-                            >
-                              <Avatar
-                                name={c.name}
-                                size="sm"
-                                className="w-4 h-4 text-[8px]"
-                              />
-                              {c.name}
-                            </button>
-                          ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* List thành viên hiện tại */}
-                  <div className="space-y-3">
-                    {people.map((p) => (
-                      <div
-                        key={p.id}
-                        className="flex justify-between items-center p-3 bg-gray-50 rounded-xl"
-                      >
-                        <div className="flex items-center gap-3">
-                          <Avatar name={p.name} size="md" />
-                          <div>
-                            <p className="font-bold text-gray-800 text-sm">
-                              {p.name}
-                            </p>
-                            {p.email && (
-                              <p className="text-[10px] text-gray-400">
-                                {p.email}
-                              </p>
-                            )}
-                          </div>
-                        </div>
-                        {p.id !== user?.uid && (
-                          <button
-                            onClick={() => deletePerson(p.id)}
-                            className="p-2 bg-white text-red-400 rounded-lg shadow-sm"
-                          >
-                            <Trash2 size={16} />
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Chia sẻ mã nhóm */}
-                  <div className="mt-6 pt-6 border-t border-gray-100 text-center">
-                    <p className="text-xs text-gray-400 mb-2">Mã nhóm</p>
-                    <p className="text-xl font-bold text-gray-800 tracking-widest bg-gray-100 py-2 rounded-xl select-all">
-                      {groupId}
-                    </p>
-                    <button
-                      onClick={handleShareGroup}
-                      className="mt-3 text-blue-600 text-xs font-bold flex items-center justify-center gap-1 w-full"
-                    >
-                      <Share2 size={12} /> Chia sẻ mã này
-                    </button>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              // >>> 2.2 GROUP: DASHBOARD (LIST NỢ & LỊCH SỬ) <<<
-              <div className="flex flex-col gap-4 h-full pt-2 pb-4">
-                {/* Horizontal Scroll List Nợ (ĐÃ CẬP NHẬT NÚT TICK & BUZZ) */}
-                <div className="bg-white pt-4 pb-2 px-0 rounded-[2rem] shadow-sm">
-                  <h3 className="font-bold text-gray-700 text-xs uppercase px-5 mb-3">
-                    Bảng công nợ
-                  </h3>
-
-                  <div className="flex overflow-x-auto gap-3 px-5 pb-4 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:'none'] [scrollbar-width:'none'] snap-x">
-                    {/* Add Member Button */}
-                    <div
-                      onClick={() => setActiveTab("people")}
-                      className="min-w-[100px] bg-gray-50 p-4 rounded-2xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center gap-2 active:scale-95 transition-transform snap-center cursor-pointer"
-                    >
-                      <div className="w-8 h-8 rounded-full bg-white flex items-center justify-center text-gray-400 shadow-sm">
-                        <Plus size={16} />
-                      </div>
-                      <span className="text-[10px] font-bold text-gray-400">
-                        Thêm người
-                      </span>
-                    </div>
-
-                    {/* Debt Cards */}
-                    {sortedPeople
-                      .filter((p) => p.id !== user?.uid) // Lọc bỏ chính mình
-                      .map((p) => {
-                        const debt = calculateNetDebt(p.id);
-                        return (
-                          <div
-                            key={p.id}
-                            onClick={() => setSelectedPersonId(p.id)}
-                            className="min-w-[120px] bg-white p-3 rounded-2xl shadow-[0_4px_12px_rgba(0,0,0,0.05)] border border-gray-100 flex flex-col items-center gap-2 relative snap-center active:scale-95 transition-transform"
-                          >
-                            {/* Nút Tick Xanh (Settle All) - Mới */}
-                            {debt > 0 && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleSettleAll(p);
-                                }}
-                                className="absolute top-1 left-1 p-1.5 bg-emerald-50 text-emerald-600 rounded-full shadow-sm z-10"
-                              >
-                                <Check size={12} strokeWidth={3} />
-                              </button>
-                            )}
-
-                            {/* Nút Buzz Vàng - Mới */}
-                            {debt > 0 && (
-                              <button
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleBuzz(p);
-                                }}
-                                className="absolute top-1 right-1 p-1.5 bg-yellow-50 text-yellow-600 rounded-full shadow-sm z-10"
-                              >
-                                <Bell size={12} className="fill-current" />
-                              </button>
-                            )}
-
-                            <Avatar name={p.name} size="md" />
-                            <div className="text-center w-full">
-                              <p className="font-bold text-gray-800 text-xs truncate w-full mb-1">
-                                {p.name}
-                              </p>
-                              <span
-                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-lg ${
-                                  debt >= 0
-                                    ? "bg-emerald-50 text-emerald-600"
-                                    : "bg-rose-50 text-rose-600"
-                                }`}
-                              >
-                                {formatCurrency(Math.abs(debt))}
-                              </span>
-                            </div>
-                          </div>
-                        );
-                      })}
-                  </div>
-                </div>
-
-                {/* Recent History */}
-                <div className="bg-white p-4 rounded-[2rem] shadow-sm flex-1 flex flex-col min-h-[30vh]">
-                  {/* Header: Thêm shrink-0 để không bị co lại khi list dài */}
-                  <div className="flex justify-between items-center mb-4 px-2 shrink-0">
-                    <h3 className="font-bold text-gray-700 text-xs uppercase">
-                      Giao dịch mới
-                    </h3>
-                    <button
-                      onClick={() => setIsHistoryModalOpen(true)}
-                      className="text-blue-600 text-xs font-bold flex items-center gap-1"
-                    >
-                      Xem tất cả <ChevronRight size={12} />
-                    </button>
-                  </div>
-
-                  {/* Body: Thêm overflow-y-auto để cuộn vùng này */}
-                  <div className="flex-1 overflow-y-auto custom-scrollbar">
-                    {expenses.length === 0 ? (
-                      <div className="text-center py-10 text-gray-300 flex flex-col items-center">
-                        <History size={32} className="mb-2 opacity-50" />
-                        <span className="text-xs">Chưa có giao dịch</span>
-                      </div>
-                    ) : (
-                      <div className="space-y-3 pb-2">
-                        {/* Thêm pb-2 để item cuối không bị sát mép dưới quá */}
-                        {expenses
-                          .slice(0, 50)
-                          .map((exp) => renderHistoryItem(exp, true))}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* POPUP CHI TIẾT THÀNH VIÊN MOBILE (Giữ nguyên logic cũ nhưng style lại chút) */}
-            {selectedPersonId && (
-              <div className="fixed inset-0 z-50 bg-white flex flex-col animate-slide-up">
-                <div className="p-4 border-b border-gray-100 flex items-center gap-3">
-                  <button
-                    onClick={() => setSelectedPersonId(null)}
-                    className="p-2 bg-gray-100 rounded-full"
-                  >
-                    <ArrowRightLeft size={20} />
-                  </button>
-                  <span className="font-bold text-lg">Chi tiết công nợ</span>
-                </div>
-                {(() => {
-                  const p = people.find((item) => item.id === selectedPersonId);
-                  if (!p) return null;
-                  const debt = calculateNetDebt(p.id);
-                  const related = expenses.filter(
-                    (e) => e.sharedWith.includes(p.id) || e.payerId === p.id,
-                  );
-
-                  return (
-                    <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
-                      <div className="bg-white p-6 rounded-[2rem] shadow-sm text-center mb-6">
-                        <Avatar
-                          name={p.name}
-                          size="lg"
-                          className="mx-auto mb-3 shadow-lg"
-                        />
-                        <h2 className="text-2xl font-bold text-gray-800">
-                          {p.name}
-                        </h2>
-                        {p.email && (
-                          <p className="text-sm text-gray-400 mb-4">
-                            {p.email}
-                          </p>
-                        )}
-
-                        <div
-                          className={`inline-block px-4 py-2 rounded-xl text-lg font-bold ${
-                            debt >= 0
-                              ? "bg-emerald-100 text-emerald-700"
-                              : "bg-rose-100 text-rose-700"
-                          }`}
-                        >
-                          {debt >= 0
-                            ? `Nợ tôi: ${formatCurrency(debt)}`
-                            : `Tôi nợ: ${formatCurrency(Math.abs(debt))}`}
-                        </div>
-
-                        {debt > 0 && (
-                          <div className="flex justify-center gap-3 mt-6">
-                            <button
-                              onClick={() => handleBuzz(p)}
-                              className="flex items-center gap-2 px-4 py-2 bg-yellow-400 text-yellow-900 rounded-xl font-bold shadow-md active:scale-95"
-                            >
-                              <Bell size={18} className="fill-current" /> Buzz!
-                            </button>
-                            <button
-                              onClick={() => handleSettleAll(p)}
-                              className="flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold shadow-md active:scale-95"
-                            >
-                              <Check size={18} /> Xác nhận trả
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      <h3 className="font-bold text-gray-500 text-xs uppercase mb-3 ml-2">
-                        Lịch sử chung ({related.length})
-                      </h3>
-                      <div className="space-y-3 pb-10">
-                        {related.map((e) => renderHistoryItem(e, true))}
-                      </div>
-                    </div>
-                  );
-                })()}
-              </div>
-            )}
-          </div>
-
-          {/* 3. BOTTOM NAVIGATION (Chỉ hiện khi chưa chọn chi tiết member) */}
-          {!selectedPersonId && (
-            <div className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-100 pb-[env(safe-area-inset-bottom)] shadow-[0_-5px_20px_rgba(0,0,0,0.05)]">
-              <div className="flex justify-around items-center h-16 px-6">
-                <button
-                  onClick={() => setActiveTab("dashboard")}
-                  className={`flex flex-col items-center gap-1 ${
-                    activeTab === "dashboard"
-                      ? "text-blue-600"
-                      : "text-gray-400"
-                  }`}
-                >
-                  <Home
-                    size={24}
-                    strokeWidth={activeTab === "dashboard" ? 2.5 : 2}
-                  />
-                  <span className="text-[10px] font-bold">Trang chủ</span>
-                </button>
-
-                {/* Nút Add to ở giữa - Chỉ hiện khi CÓ Group (để add giao dịch) */}
-                {groupId ? (
-                  <div className="relative -top-6">
-                    <button
-                      onClick={openAddModal}
-                      className="w-16 h-16 bg-gradient-to-tr from-blue-500 to-indigo-600 rounded-full shadow-xl shadow-blue-300 text-white flex items-center justify-center active:scale-95 transition-transform border-4 border-gray-50"
-                    >
-                      <Plus size={32} strokeWidth={3} />
-                    </button>
-                  </div>
-                ) : (
-                  // Nếu Global thì nút giữa là tạo Group (hoặc ẩn đi cho đẹp)
-                  <div className="w-10"></div>
-                )}
-
-                <button
-                  onClick={() => setActiveTab("people")}
-                  className={`flex flex-col items-center gap-1 ${
-                    activeTab === "people" ? "text-blue-600" : "text-gray-400"
-                  }`}
-                >
-                  <Users
-                    size={24}
-                    strokeWidth={activeTab === "people" ? 2.5 : 2}
-                  />
-                  <span className="text-[10px] font-bold">
-                    {groupId ? "Thành viên" : "Danh bạ"}
-                  </span>
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-        {/* --- DESKTOP / IPAD VIEW (FULL CODE ĐÃ SỬA LỖI) --- */}
-        <div className="hidden md:block flex-1 overflow-hidden p-8">
-          {/* ========================================================
-              TRƯỜNG HỢP 1: GLOBAL VIEW (DANH BẠ & TỔNG QUAN)
-              ======================================================== */}
-          {!groupId ? (
-            activeTab === "people" ? (
-              // >>> 1.1: QUẢN LÝ DANH BẠ (THÊM BẠN MỚI TẠI ĐÂY) <<<
-              <div className="h-full flex flex-col animate-fade-in">
-                <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
-                  <Users className="text-blue-600" /> Danh bạ bạn bè
-                </h2>
-
-                {/* FORM THÊM BẠN VÀO DANH BẠ */}
-                <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 mb-6 flex gap-4 items-end">
-                  <div className="flex-1 space-y-1">
-                    <label className="text-xs font-bold text-gray-500 uppercase">
-                      Tên gợi nhớ
-                    </label>
-                    <input
-                      value={newPersonName}
-                      onChange={(e) => setNewPersonName(e.target.value)}
-                      className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
-                      placeholder="Ví dụ: GDragon..."
-                    />
-                  </div>
-                  <div className="flex-1 space-y-1">
-                    <label className="text-xs font-bold text-gray-500 uppercase">
-                      Email (để Buzz)
-                    </label>
-                    <input
-                      value={newPersonEmail}
-                      onChange={(e) => setNewPersonEmail(e.target.value)}
-                      className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
-                      placeholder="example@gmail.com"
-                    />
-                  </div>
-                  <button
-                    onClick={addToContacts}
-                    className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-transform active:scale-95"
-                  >
-                    + Thêm vào danh bạ
-                  </button>
-                </div>
-
-                {/* LIST DANH BẠ HIỆN CÓ */}
-                <div className="flex-1 bg-white rounded-[2rem] shadow-sm border border-gray-200 overflow-hidden flex flex-col">
-                  <div className="p-4 border-b border-gray-100 bg-gray-50/50">
-                    <p className="text-sm text-gray-500">
-                      Đây là danh sách bạn bè dùng chung cho tất cả các nhóm.
-                    </p>
-                  </div>
-                  <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
-                    {/* TÌM THẺ DIV NÀY VÀ THAY THẾ NỘI DUNG BÊN TRONG NÓ */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                      {contacts.length === 0 ? (
-                        <div className="col-span-full text-center text-gray-400 mt-10 italic">
-                          Chưa có bạn bè nào trong danh bạ.
-                        </div>
-                      ) : (
-                        contacts.map((contact) => (
-                          <div
-                            key={contact.id}
-                            className="flex items-center gap-4 p-4 bg-gray-50 rounded-2xl border border-gray-100 relative group hover:bg-white hover:shadow-md transition-all"
-                          >
-                            <Avatar name={contact.name} size="md" />
-                            <div className="flex-1 min-w-0">
-                              <h4 className="font-bold text-gray-800 truncate">
-                                {contact.name}
-                              </h4>
-                              {contact.email ? (
-                                <p className="text-xs text-gray-400 truncate">
-                                  {contact.email}
-                                </p>
-                              ) : (
-                                <p className="text-xs text-orange-400 italic">
-                                  Chưa có email
-                                </p>
-                              )}
-                            </div>
-
-                            {/* Nút Sửa (Hiện khi hover - MỚI) */}
-                            <button
-                              onClick={() => setEditingContact(contact)}
-                              className="absolute top-4 right-4 p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition-all hover:scale-110"
-                              title="Sửa thông tin"
-                            >
-                              <Edit2 size={16} />
-                            </button>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ) : (
-              // >>> 1.2: DASHBOARD TỔNG QUAN (VIEW MẶC ĐỊNH) <<<
-              <div className="h-full flex flex-col animate-fade-in">
-                <h2 className="text-2xl font-bold text-gray-800 mb-6">
-                  Tổng quan tài chính
-                </h2>
-
-                {loadingGlobal ? (
-                  <div className="text-gray-500 italic">
-                    Đang tải dữ liệu...
-                  </div>
-                ) : (
-                  <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
-                    {/* 3 CARD STATS */}
-                    <div className="grid grid-cols-3 gap-6 mb-8">
-                      <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden flex flex-col justify-center min-h-[140px]">
-                        <div className="absolute top-[-20px] right-[-20px] w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
-                        <p className="opacity-80 text-sm font-bold uppercase mb-1 relative z-10">
-                          Tài sản ròng
-                        </p>
-                        <h3
-                          className="text-3xl xl:text-4xl font-bold tracking-tight relative z-10 truncate"
-                          title={formatCurrency(globalStats.netWorth)}
-                        >
-                          {formatCompactCurrency(globalStats.netWorth)}
-                        </h3>
-                      </div>
-                      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex flex-col justify-center min-h-[140px]">
-                        <p className="text-gray-500 font-bold text-sm uppercase mb-1">
-                          Cần thu về
-                        </p>
-                        <h3
-                          className="text-2xl xl:text-3xl font-bold text-emerald-600 truncate"
-                          title={formatCurrency(globalStats.totalOwed)}
-                        >
-                          {formatCompactCurrency(globalStats.totalOwed)}
-                        </h3>
-                      </div>
-                      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex flex-col justify-center min-h-[140px]">
-                        <p className="text-gray-500 font-bold text-sm uppercase mb-1">
-                          Cần phải trả
-                        </p>
-                        <h3
-                          className="text-2xl xl:text-3xl font-bold text-rose-600 truncate"
-                          title={formatCurrency(globalStats.totalDebt)}
-                        >
-                          {formatCompactCurrency(globalStats.totalDebt)}
-                        </h3>
-                      </div>
-                    </div>
-
-                    {/* LIST CHI TIẾT NỢ TOÀN CỤC */}
-                    <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 mb-6">
-                      <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
-                        <Users size={18} className="text-blue-500" />
-                        Chi tiết công nợ (Tất cả các nhóm)
-                      </h3>
-                      <div className="space-y-2">
-                        {globalFriendStats.length === 0 ? (
-                          <p className="text-gray-400 text-center italic py-4">
-                            Hiện tại không có công nợ nào.
+                        {contacts.length === 0 ? (
+                          <p className="text-center text-gray-400 text-sm italic mt-10">
+                            Danh bạ trống
                           </p>
                         ) : (
-                          globalFriendStats.map((item, idx) => (
+                          contacts.map((c) => (
                             <div
-                              key={idx}
-                              className="flex justify-between items-center p-3 hover:bg-gray-50 rounded-xl transition-colors border-b border-gray-50 last:border-0"
+                              key={c.id}
+                              className="flex items-center gap-3 p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-blue-200 transition-all group"
                             >
-                              <div className="flex items-center gap-3">
-                                <Avatar name={item.name} size="md" />
-                                <div>
-                                  <p className="font-bold text-gray-800">
-                                    {item.name}
+                              <Avatar name={c.name} size="md" />
+                              <div className="flex-1 min-w-0">
+                                <p className="font-bold text-gray-800 text-sm truncate">
+                                  {c.name}
+                                </p>
+                                {c.email ? (
+                                  <p className="text-xs text-gray-400 truncate">
+                                    {c.email}
                                   </p>
-                                  {item.email && (
-                                    <p className="text-xs text-gray-400">
-                                      {item.email}
-                                    </p>
-                                  )}
-                                </div>
+                                ) : (
+                                  <p className="text-[10px] text-orange-400 italic">
+                                    Chưa có email
+                                  </p>
+                                )}
                               </div>
-                              <div
-                                className={`font-bold text-lg ${
-                                  item.amount >= 0
-                                    ? "text-emerald-600"
-                                    : "text-rose-600"
-                                }`}
+                              {/* Nút Sửa (MỚI) */}
+                              <button
+                                onClick={() => setEditingContact(c)}
+                                className="p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm border border-gray-100"
                               >
-                                {item.amount >= 0 ? "+" : "-"}
-                                {formatCurrency(Math.abs(item.amount))}
-                              </div>
+                                <Edit2 size={16} />
+                              </button>
                             </div>
                           ))
                         )}
                       </div>
                     </div>
-
-                    {/* --- LỊCH SỬ GIAO DỊCH TOÀN CỤC (ĐÃ SỬA: GỌN + NÚT XEM TẤT CẢ) --- */}
-                    <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 mb-8 flex flex-col h-[350px]">
-                      <div className="flex justify-between items-center mb-6 shrink-0">
-                        <h3 className="font-bold text-gray-800 flex items-center gap-2 text-lg">
-                          <History size={20} className="text-violet-500" />
-                          Hoạt động gần đây
+                  </div>
+                ) : (
+                  // >>> 1.2 GLOBAL: DASHBOARD TỔNG QUAN <<<
+                  <div className="flex flex-col gap-4 h-full overflow-y-auto custom-scrollbar pt-2 pb-4">
+                    {/* List Nhóm (Card ngang - SWIPE TO ACTION) */}
+                    <div className="bg-white p-4 rounded-[2rem] shadow-sm">
+                      <div className="flex justify-between items-center mb-3">
+                        <h3 className="font-bold text-gray-700 text-sm uppercase">
+                          Nhóm của tôi
                         </h3>
-                        <div className="flex gap-2">
-                          {/* Nút Xem tất cả */}
-                          <button
-                            onClick={() => setIsHistoryModalOpen(true)}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs font-bold hover:bg-gray-200 transition-colors border border-gray-200"
-                          >
-                            <span>Xem tất cả</span>
-                            <ChevronRight size={12} />
-                          </button>
-
-                          {/* Nút Tạo nhóm */}
-                          <button
-                            onClick={() => setIsCreateGroupModalOpen(true)}
-                            className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-100"
-                          >
-                            <Plus size={14} /> Tạo nhóm
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => setIsCreateGroupModalOpen(true)}
+                          className="text-blue-600 bg-blue-50 p-1.5 rounded-lg"
+                        >
+                          <Plus size={16} />
+                        </button>
                       </div>
 
-                      <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
-                        {globalHistory.length === 0 ? (
-                          <div className="h-full flex flex-col items-center justify-center text-gray-400 opacity-60">
-                            <div className="bg-gray-50 p-4 rounded-full mb-3">
-                              <History size={32} />
-                            </div>
-                            <p className="text-sm">Chưa có giao dịch nào.</p>
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {globalHistory.slice(0, 10).map(
-                              (
-                                item,
-                                idx, // Chỉ hiện 10 tin mới nhất ở đây cho gọn
-                              ) => (
-                                <div key={`${item.id}_${idx}`}>
-                                  {renderHistoryItem(item)}
+                      {myGroups.length === 0 ? (
+                        <div className="text-center py-6 text-gray-400 text-xs italic border-2 border-dashed border-gray-100 rounded-xl">
+                          Chưa có nhóm nào.
+                        </div>
+                      ) : (
+                        <div className="space-y-3">
+                          {myGroups.map((g) => (
+                            // Container vuốt ngang (Scroll Snap)
+                            <div
+                              key={g.id}
+                              className="flex w-full overflow-x-auto snap-x snap-mandatory [&::-webkit-scrollbar]:hidden rounded-2xl bg-gray-50 shadow-sm border border-gray-100"
+                            >
+                              {/* 1. NỘI DUNG CHÍNH (Snap Center) */}
+                              <div
+                                onClick={() => {
+                                  setGroupId(g.id);
+                                  setIsGroupMode(true);
+                                  setActiveTab("dashboard");
+                                }}
+                                className="min-w-full snap-center flex items-center gap-3 p-3 active:bg-blue-50 transition-colors bg-white"
+                              >
+                                <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center font-bold shrink-0">
+                                  {/* [FIX 4] Thêm logic hiển thị icon */}
+                                  {g.icon
+                                    ? g.icon
+                                    : g.name?.charAt(0).toUpperCase()}
                                 </div>
-                              ),
-                            )}
-                            {globalHistory.length > 10 && (
-                              <p className="text-center text-xs text-gray-400 pt-4 italic">
-                                ... và {globalHistory.length - 10} giao dịch
-                                khác
-                              </p>
-                            )}
-                          </div>
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-bold text-gray-800 text-sm truncate">
+                                    {g.name}
+                                  </p>
+                                  <p className="text-[10px] text-gray-400 font-mono">
+                                    ID: {g.id}
+                                  </p>
+                                </div>
+                                {/* Mũi tên gợi ý vuốt */}
+                                <div className="text-gray-300 animate-pulse pl-2">
+                                  <ChevronLeft size={16} strokeWidth={3} />
+                                </div>
+                              </div>
+
+                              {/* 2. CÁC NÚT HÀNH ĐỘNG (Ẩn bên phải - Vuốt ra sẽ thấy) */}
+                              <div className="flex snap-center shrink-0">
+                                <button
+                                  onClick={() => openRenameModal(g)}
+                                  className="w-14 bg-yellow-400 text-yellow-900 font-bold text-[10px] flex flex-col items-center justify-center gap-1 active:bg-yellow-500"
+                                >
+                                  <Edit2 size={16} /> Sửa
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteGroup(g.id)}
+                                  className="w-14 bg-red-500 text-white font-bold text-[10px] flex flex-col items-center justify-center gap-1 active:bg-red-600 rounded-r-2xl"
+                                >
+                                  <Trash2 size={16} /> Xóa
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Global Debts */}
+                    <div className="bg-white p-4 rounded-[2rem] shadow-sm flex-1">
+                      <h3 className="font-bold text-gray-700 text-sm uppercase mb-3">
+                        Chi tiết công nợ (Tất cả)
+                      </h3>
+                      <div className="space-y-3">
+                        {globalFriendStats.length === 0 ? (
+                          <p className="text-center text-gray-400 text-xs italic">
+                            Không có công nợ.
+                          </p>
+                        ) : (
+                          globalFriendStats.map((item, idx) => (
+                            <div
+                              key={idx}
+                              className="flex justify-between items-center p-2 border-b border-gray-50 last:border-0"
+                            >
+                              <div className="flex items-center gap-3">
+                                <Avatar name={item.name} size="sm" />
+                                <span className="font-bold text-sm text-gray-700">
+                                  {item.name}
+                                </span>
+                              </div>
+                              <span
+                                className={`font-bold text-sm ${
+                                  item.amount >= 0
+                                    ? "text-emerald-600"
+                                    : "text-rose-600"
+                                }`}
+                              >
+                                {item.amount >= 0 ? "+" : ""}
+                                {formatCurrency(item.amount)}
+                              </span>
+                            </div>
+                          ))
                         )}
                       </div>
                     </div>
                   </div>
-                )}
-              </div>
-            )
-          ) : (
-            /* ========================================================
-               TRƯỜNG HỢP 2: GROUP VIEW (KHI ĐÃ CHỌN NHÓM)
-               ======================================================== */
-            <div className="h-full flex flex-col animate-fade-in">
-              <div className="flex justify-between items-center mb-6 shrink-0">
-                <div>
-                  <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
-                    {myGroups.find((g) => g.id === groupId)?.name}
-                  </h2>
-                  <p className="text-xs text-gray-400 font-mono mt-1">
-                    ID: {groupId}
-                  </p>
-                </div>
-                {/* TAB SWITCHER */}
-                {!selectedPersonId && (
-                  <div className="flex bg-gray-100 p-1 rounded-xl">
+                )
+              ) : /* ========================================================
+                  TRƯỜNG HỢP 2: GROUP VIEW (KHI ĐÃ CHỌN NHÓM)
+                  ======================================================== */
+              activeTab === "people" ? (
+                // >>> 2.1 GROUP: QUẢN LÝ THÀNH VIÊN (CHỌN TỪ DANH BẠ) <<<
+                <div className="bg-white rounded-[2rem] shadow-lg h-full flex flex-col overflow-hidden animate-slide-up">
+                  <div className="p-6 border-b border-gray-100 flex justify-between items-center">
+                    <h3 className="font-bold text-gray-800 text-lg">
+                      Thành viên ({people.length})
+                    </h3>
                     <button
-                      onClick={() => setActiveTab("dashboard")}
-                      className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
-                        activeTab === "dashboard"
-                          ? "bg-white shadow text-blue-600"
-                          : "text-gray-500 hover:text-gray-700"
-                      }`}
+                      onClick={() => {
+                        // Nút thoát nhóm nhỏ
+                        setGroupId("");
+                        setIsGroupMode(false);
+                      }}
+                      className="text-xs text-red-500 font-bold bg-red-50 px-3 py-1.5 rounded-lg"
                     >
-                      <LayoutDashboard size={18} /> Tổng quan
-                    </button>
-                    <button
-                      onClick={() => setActiveTab("people")}
-                      className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
-                        activeTab === "people"
-                          ? "bg-white shadow text-blue-600"
-                          : "text-gray-500 hover:text-gray-700"
-                      }`}
-                    >
-                      <Users size={18} /> Thành viên
+                      Thoát
                     </button>
                   </div>
-                )}
-              </div>
 
-              <div className="flex-1 overflow-hidden relative">
-                {selectedPersonId ? (
-                  // >>> 2.1: POPUP CHI TIẾT THÀNH VIÊN <<<
-                  <div className="h-full bg-white rounded-[2rem] shadow-sm border border-gray-200 flex flex-col relative overflow-hidden animate-slide-up">
-                    <div className="p-6 border-b flex justify-between items-center bg-gray-50">
-                      <h2 className="font-bold text-xl text-gray-700">
-                        Chi tiết công nợ
-                      </h2>
+                  <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                    {/* Khu vực thêm từ danh bạ */}
+                    <div className="bg-indigo-50 p-4 rounded-2xl mb-6 border border-indigo-100">
+                      <p className="text-xs font-bold text-indigo-800 mb-3 uppercase flex items-center gap-1">
+                        <Plus size={14} /> Thêm từ danh bạ
+                      </p>
+
+                      {contacts.length === 0 ? (
+                        <p className="text-xs text-center text-gray-400 italic bg-white/50 p-2 rounded-lg">
+                          Danh bạ trống. Ra trang chủ để thêm.
+                        </p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {contacts.filter(
+                            (c) => !people.some((p) => p.id === c.id),
+                          ).length === 0 && (
+                            <p className="text-xs text-gray-400 w-full text-center">
+                              Đã thêm hết bạn bè.
+                            </p>
+                          )}
+
+                          {contacts
+                            .filter((c) => !people.some((p) => p.id === c.id))
+                            .map((c) => (
+                              <button
+                                key={c.id}
+                                onClick={() => addContactToGroup(c)}
+                                className="flex items-center gap-1 px-3 py-2 bg-white rounded-xl border border-indigo-200 text-xs font-bold text-gray-700 shadow-sm active:scale-95"
+                              >
+                                <Avatar
+                                  name={c.name}
+                                  size="sm"
+                                  className="w-4 h-4 text-[8px]"
+                                />
+                                {c.name}
+                              </button>
+                            ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* List thành viên hiện tại */}
+                    <div className="space-y-3">
+                      {people.map((p) => (
+                        <div
+                          key={p.id}
+                          className="flex justify-between items-center p-3 bg-gray-50 rounded-xl"
+                        >
+                          <div className="flex items-center gap-3">
+                            <Avatar name={p.name} size="md" />
+                            <div>
+                              <p className="font-bold text-gray-800 text-sm">
+                                {p.name}
+                              </p>
+                              {p.email && (
+                                <p className="text-[10px] text-gray-400">
+                                  {p.email}
+                                </p>
+                              )}
+                            </div>
+                          </div>
+                          {p.id !== user?.uid && (
+                            <button
+                              onClick={() => deletePerson(p.id)}
+                              className="p-2 bg-white text-red-400 rounded-lg shadow-sm"
+                            >
+                              <Trash2 size={16} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Chia sẻ mã nhóm */}
+                    <div className="mt-6 pt-6 border-t border-gray-100 text-center">
+                      <p className="text-xs text-gray-400 mb-2">Mã nhóm</p>
+                      <p className="text-xl font-bold text-gray-800 tracking-widest bg-gray-100 py-2 rounded-xl select-all">
+                        {groupId}
+                      </p>
                       <button
-                        onClick={() => setSelectedPersonId(null)}
-                        className="p-2 bg-white rounded-full shadow hover:bg-gray-100"
+                        onClick={handleShareGroup}
+                        className="mt-3 text-blue-600 text-xs font-bold flex items-center justify-center gap-1 w-full"
                       >
-                        <X size={20} />
+                        <Share2 size={12} /> Chia sẻ mã này
                       </button>
                     </div>
-                    <div className="flex-1 overflow-y-auto p-10 custom-scrollbar">
-                      {(() => {
-                        const p = people.find(
-                          (item) => item.id === selectedPersonId,
-                        );
-                        if (!p) return null;
-                        const debt = calculateNetDebt(p.id);
-                        const related = expenses.filter(
-                          (e) =>
-                            e.sharedWith.includes(p.id) || e.payerId === p.id,
-                        );
-                        return (
-                          <div className="max-w-3xl mx-auto">
-                            <div className="flex items-center gap-8 mb-10 p-8 bg-gray-50/80 rounded-[2rem] border border-gray-100 relative">
-                              <Avatar
-                                name={p.name}
-                                size="lg"
-                                className="shadow-lg"
-                              />
-                              <div>
-                                <h2 className="text-4xl font-bold text-gray-800">
-                                  {p.name}
-                                </h2>
-                                {p.email && (
-                                  <p className="text-gray-500 font-medium mt-1">
-                                    {p.email}
-                                  </p>
-                                )}
-                                <div
-                                  className={`mt-3 inline-flex items-center px-4 py-2 rounded-xl text-lg font-bold ${
-                                    debt >= 0
-                                      ? "bg-emerald-100 text-emerald-700"
-                                      : "bg-rose-100 text-rose-700"
-                                  }`}
-                                >
-                                  {debt >= 0
-                                    ? `Nợ tôi: ${formatCurrency(debt)}`
-                                    : `Tôi nợ: ${formatCurrency(
-                                        Math.abs(debt),
-                                      )}`}
-                                </div>
-                              </div>
+                  </div>
+                </div>
+              ) : (
+                // >>> 2.2 GROUP: DASHBOARD (LIST NỢ & LỊCH SỬ) <<<
+                <div className="flex flex-col gap-4 h-full pt-2 pb-4">
+                  {/* Horizontal Scroll List Nợ (ĐÃ CẬP NHẬT NÚT TICK & BUZZ) */}
+                  <div className="bg-white pt-4 pb-2 px-0 rounded-[2rem] shadow-sm">
+                    <h3 className="font-bold text-gray-700 text-xs uppercase px-5 mb-3">
+                      Bảng công nợ
+                    </h3>
+
+                    <div className="flex overflow-x-auto gap-3 px-5 pb-4 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:'none'] [scrollbar-width:'none'] snap-x">
+                      {/* Add Member Button */}
+                      <div
+                        onClick={() => setActiveTab("people")}
+                        className="min-w-[100px] bg-gray-50 p-4 rounded-2xl border-2 border-dashed border-gray-200 flex flex-col items-center justify-center gap-2 active:scale-95 transition-transform snap-center cursor-pointer"
+                      >
+                        <div className="w-8 h-8 rounded-full bg-white flex items-center justify-center text-gray-400 shadow-sm">
+                          <Plus size={16} />
+                        </div>
+                        <span className="text-[10px] font-bold text-gray-400">
+                          Thêm người
+                        </span>
+                      </div>
+
+                      {/* Debt Cards */}
+                      {sortedPeople
+                        .filter((p) => p.id !== user?.uid) // Lọc bỏ chính mình
+                        .map((p) => {
+                          const debt = calculateNetDebt(p.id);
+                          return (
+                            <div
+                              key={p.id}
+                              onClick={() => setSelectedPersonId(p.id)}
+                              className="min-w-[120px] bg-white p-3 rounded-2xl shadow-[0_4px_12px_rgba(0,0,0,0.05)] border border-gray-100 flex flex-col items-center gap-2 relative snap-center active:scale-95 transition-transform"
+                            >
+                              {/* Nút Tick Xanh (Settle All) - Mới */}
                               {debt > 0 && (
                                 <button
-                                  onClick={() => handleBuzz(p)}
-                                  className="absolute right-8 top-1/2 -translate-y-1/2 bg-yellow-400 hover:bg-yellow-500 text-yellow-900 px-6 py-4 rounded-2xl font-bold shadow-lg flex flex-col items-center gap-1 active:scale-95"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleSettleAll(p);
+                                  }}
+                                  className="absolute top-1 left-1 p-1.5 bg-emerald-50 text-emerald-600 rounded-full shadow-sm z-10"
                                 >
-                                  <Bell
-                                    size={24}
-                                    className="fill-current animate-pulse"
-                                  />{" "}
-                                  BUZZ!
+                                  <Check size={12} strokeWidth={3} />
+                                </button>
+                              )}
+
+                              {/* Nút Buzz Vàng - Mới */}
+                              {debt > 0 && (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleBuzz(p);
+                                  }}
+                                  className="absolute top-1 right-1 p-1.5 bg-yellow-50 text-yellow-600 rounded-full shadow-sm z-10"
+                                >
+                                  <Bell size={12} className="fill-current" />
+                                </button>
+                              )}
+
+                              <Avatar name={p.name} size="md" />
+                              <div className="text-center w-full">
+                                <p className="font-bold text-gray-800 text-xs truncate w-full mb-1">
+                                  {p.name}
+                                </p>
+                                <span
+                                  className={`text-[10px] font-extrabold px-2 py-0.5 rounded-lg ${
+                                    debt >= 0
+                                      ? "bg-emerald-50 text-emerald-600"
+                                      : "bg-rose-50 text-rose-600"
+                                  }`}
+                                >
+                                  {formatCurrency(Math.abs(debt))}
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                    </div>
+                  </div>
+
+                  {/* Recent History */}
+                  <div className="bg-white p-4 rounded-[2rem] shadow-sm flex-1 flex flex-col min-h-[30vh]">
+                    {/* Header: Thêm shrink-0 để không bị co lại khi list dài */}
+                    <div className="flex justify-between items-center mb-4 px-2 shrink-0">
+                      <h3 className="font-bold text-gray-700 text-xs uppercase">
+                        Giao dịch mới
+                      </h3>
+                      <button
+                        onClick={() => setIsHistoryModalOpen(true)}
+                        className="text-blue-600 text-xs font-bold flex items-center gap-1"
+                      >
+                        Xem tất cả <ChevronRight size={12} />
+                      </button>
+                    </div>
+
+                    {/* Body: Thêm overflow-y-auto để cuộn vùng này */}
+                    <div className="flex-1 overflow-y-auto custom-scrollbar">
+                      {expenses.length === 0 ? (
+                        <div className="text-center py-10 text-gray-300 flex flex-col items-center">
+                          <History size={32} className="mb-2 opacity-50" />
+                          <span className="text-xs">Chưa có giao dịch</span>
+                        </div>
+                      ) : (
+                        <div className="space-y-3 pb-2">
+                          {/* Thêm pb-2 để item cuối không bị sát mép dưới quá */}
+                          {expenses
+                            .slice(0, 50)
+                            .map((exp) => renderHistoryItem(exp, true))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* POPUP CHI TIẾT THÀNH VIÊN MOBILE (Giữ nguyên logic cũ nhưng style lại chút) */}
+              {selectedPersonId && (
+                <div className="fixed inset-0 z-50 bg-white flex flex-col animate-slide-up">
+                  <div className="p-4 border-b border-gray-100 flex items-center gap-3">
+                    <button
+                      onClick={() => setSelectedPersonId(null)}
+                      className="p-2 bg-gray-100 rounded-full"
+                    >
+                      <ArrowRightLeft size={20} />
+                    </button>
+                    <span className="font-bold text-lg">Chi tiết công nợ</span>
+                  </div>
+                  {(() => {
+                    const p = people.find(
+                      (item) => item.id === selectedPersonId,
+                    );
+                    if (!p) return null;
+                    const debt = calculateNetDebt(p.id);
+                    const related = expenses.filter(
+                      (e) => e.sharedWith.includes(p.id) || e.payerId === p.id,
+                    );
+
+                    return (
+                      <div className="flex-1 overflow-y-auto p-6 bg-gray-50">
+                        <div className="bg-white p-6 rounded-[2rem] shadow-sm text-center mb-6">
+                          <Avatar
+                            name={p.name}
+                            size="lg"
+                            className="mx-auto mb-3 shadow-lg"
+                          />
+                          <h2 className="text-2xl font-bold text-gray-800">
+                            {p.name}
+                          </h2>
+                          {p.email && (
+                            <p className="text-sm text-gray-400 mb-4">
+                              {p.email}
+                            </p>
+                          )}
+
+                          <div
+                            className={`inline-block px-4 py-2 rounded-xl text-lg font-bold ${
+                              debt >= 0
+                                ? "bg-emerald-100 text-emerald-700"
+                                : "bg-rose-100 text-rose-700"
+                            }`}
+                          >
+                            {debt >= 0
+                              ? `Nợ tôi: ${formatCurrency(debt)}`
+                              : `Tôi nợ: ${formatCurrency(Math.abs(debt))}`}
+                          </div>
+
+                          {debt > 0 && (
+                            <div className="flex justify-center gap-3 mt-6">
+                              <button
+                                onClick={() => handleBuzz(p)}
+                                className="flex items-center gap-2 px-4 py-2 bg-yellow-400 text-yellow-900 rounded-xl font-bold shadow-md active:scale-95"
+                              >
+                                <Bell size={18} className="fill-current" />{" "}
+                                Buzz!
+                              </button>
+                              <button
+                                onClick={() => handleSettleAll(p)}
+                                className="flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold shadow-md active:scale-95"
+                              >
+                                <Check size={18} /> Xác nhận trả
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        <h3 className="font-bold text-gray-500 text-xs uppercase mb-3 ml-2">
+                          Lịch sử chung ({related.length})
+                        </h3>
+                        <div className="space-y-3 pb-10">
+                          {related.map((e) => renderHistoryItem(e, true))}
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
+
+            {/* 3. BOTTOM NAVIGATION (Chỉ hiện khi chưa chọn chi tiết member) */}
+            {!selectedPersonId && (
+              <div className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-100 pb-[env(safe-area-inset-bottom)] shadow-[0_-5px_20px_rgba(0,0,0,0.05)]">
+                <div className="flex justify-around items-center h-16 px-6">
+                  <button
+                    onClick={() => setActiveTab("dashboard")}
+                    className={`flex flex-col items-center gap-1 ${
+                      activeTab === "dashboard"
+                        ? "text-blue-600"
+                        : "text-gray-400"
+                    }`}
+                  >
+                    <Home
+                      size={24}
+                      strokeWidth={activeTab === "dashboard" ? 2.5 : 2}
+                    />
+                    <span className="text-[10px] font-bold">Trang chủ</span>
+                  </button>
+
+                  {/* Nút Add to ở giữa - Chỉ hiện khi CÓ Group (để add giao dịch) */}
+                  {groupId ? (
+                    <div className="relative -top-6">
+                      <button
+                        onClick={openAddModal}
+                        className="w-16 h-16 bg-gradient-to-tr from-blue-500 to-indigo-600 rounded-full shadow-xl shadow-blue-300 text-white flex items-center justify-center active:scale-95 transition-transform border-4 border-gray-50"
+                      >
+                        <Plus size={32} strokeWidth={3} />
+                      </button>
+                    </div>
+                  ) : (
+                    // Nếu Global thì nút giữa là tạo Group (hoặc ẩn đi cho đẹp)
+                    <div className="w-10"></div>
+                  )}
+
+                  <button
+                    onClick={() => setActiveTab("people")}
+                    className={`flex flex-col items-center gap-1 ${
+                      activeTab === "people" ? "text-blue-600" : "text-gray-400"
+                    }`}
+                  >
+                    <Users
+                      size={24}
+                      strokeWidth={activeTab === "people" ? 2.5 : 2}
+                    />
+                    <span className="text-[10px] font-bold">
+                      {groupId ? "Thành viên" : "Danh bạ"}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+        {/* --- DESKTOP / IPAD VIEW --- */}
+        {/* Chỉ render khi KHÔNG PHẢI mobile */}
+        {!isMobileView && (
+          <div className="flex-1 overflow-hidden p-8">
+            {/* ========================================================
+              TRƯỜNG HỢP 1: GLOBAL VIEW (DANH BẠ & TỔNG QUAN)
+              ======================================================== */}
+            {!groupId ? (
+              activeTab === "people" ? (
+                // >>> 1.1: QUẢN LÝ DANH BẠ (THÊM BẠN MỚI TẠI ĐÂY) <<<
+                <div className="h-full flex flex-col animate-fade-in">
+                  <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
+                    <Users className="text-blue-600" /> Danh bạ bạn bè
+                  </h2>
+
+                  {/* FORM THÊM BẠN VÀO DANH BẠ */}
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 mb-6 flex gap-4 items-end">
+                    <div className="flex-1 space-y-1">
+                      <label className="text-xs font-bold text-gray-500 uppercase">
+                        Tên gợi nhớ
+                      </label>
+                      <input
+                        value={newPersonName}
+                        onChange={(e) => setNewPersonName(e.target.value)}
+                        className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
+                        placeholder="Ví dụ: GDragon..."
+                      />
+                    </div>
+                    <div className="flex-1 space-y-1">
+                      <label className="text-xs font-bold text-gray-500 uppercase">
+                        Email (để Buzz)
+                      </label>
+                      <input
+                        value={newPersonEmail}
+                        onChange={(e) => setNewPersonEmail(e.target.value)}
+                        className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
+                        placeholder="example@gmail.com"
+                      />
+                    </div>
+                    <button
+                      onClick={addToContacts}
+                      className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-transform active:scale-95"
+                    >
+                      + Thêm vào danh bạ
+                    </button>
+                  </div>
+
+                  {/* LIST DANH BẠ HIỆN CÓ */}
+                  <div className="flex-1 bg-white rounded-[2rem] shadow-sm border border-gray-200 overflow-hidden flex flex-col">
+                    <div className="p-4 border-b border-gray-100 bg-gray-50/50">
+                      <p className="text-sm text-gray-500">
+                        Đây là danh sách bạn bè dùng chung cho tất cả các nhóm.
+                      </p>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-6 custom-scrollbar">
+                      {/* TÌM THẺ DIV NÀY VÀ THAY THẾ NỘI DUNG BÊN TRONG NÓ */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {contacts.length === 0 ? (
+                          <div className="col-span-full text-center text-gray-400 mt-10 italic">
+                            Chưa có bạn bè nào trong danh bạ.
+                          </div>
+                        ) : (
+                          contacts.map((contact) => (
+                            <div
+                              key={contact.id}
+                              className="flex items-center gap-4 p-4 bg-gray-50 rounded-2xl border border-gray-100 relative group hover:bg-white hover:shadow-md transition-all"
+                            >
+                              <Avatar name={contact.name} size="md" />
+                              <div className="flex-1 min-w-0">
+                                <h4 className="font-bold text-gray-800 truncate">
+                                  {contact.name}
+                                </h4>
+                                {contact.email ? (
+                                  <p className="text-xs text-gray-400 truncate">
+                                    {contact.email}
+                                  </p>
+                                ) : (
+                                  <p className="text-xs text-orange-400 italic">
+                                    Chưa có email
+                                  </p>
+                                )}
+                              </div>
+
+                              {/* Nút Sửa (Hiện khi hover - MỚI) */}
+                              <button
+                                onClick={() => setEditingContact(contact)}
+                                className="absolute top-4 right-4 p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition-all hover:scale-110"
+                                title="Sửa thông tin"
+                              >
+                                <Edit2 size={16} />
+                              </button>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                // >>> 1.2: DASHBOARD TỔNG QUAN (VIEW MẶC ĐỊNH) <<<
+                <div className="h-full flex flex-col animate-fade-in">
+                  <h2 className="text-2xl font-bold text-gray-800 mb-6">
+                    Tổng quan tài chính
+                  </h2>
+
+                  {loadingGlobal ? (
+                    <div className="text-gray-500 italic">
+                      Đang tải dữ liệu...
+                    </div>
+                  ) : (
+                    <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
+                      {/* 3 CARD STATS */}
+                      <div className="grid grid-cols-3 gap-6 mb-8">
+                        <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden flex flex-col justify-center min-h-[140px]">
+                          <div className="absolute top-[-20px] right-[-20px] w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
+                          <p className="opacity-80 text-sm font-bold uppercase mb-1 relative z-10">
+                            Tài sản ròng
+                          </p>
+                          <h3
+                            className="text-3xl xl:text-4xl font-bold tracking-tight relative z-10 truncate"
+                            title={formatCurrency(globalStats.netWorth)}
+                          >
+                            {formatCompactCurrency(globalStats.netWorth)}
+                          </h3>
+                        </div>
+                        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex flex-col justify-center min-h-[140px]">
+                          <p className="text-gray-500 font-bold text-sm uppercase mb-1">
+                            Cần thu về
+                          </p>
+                          <h3
+                            className="text-2xl xl:text-3xl font-bold text-emerald-600 truncate"
+                            title={formatCurrency(globalStats.totalOwed)}
+                          >
+                            {formatCompactCurrency(globalStats.totalOwed)}
+                          </h3>
+                        </div>
+                        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex flex-col justify-center min-h-[140px]">
+                          <p className="text-gray-500 font-bold text-sm uppercase mb-1">
+                            Cần phải trả
+                          </p>
+                          <h3
+                            className="text-2xl xl:text-3xl font-bold text-rose-600 truncate"
+                            title={formatCurrency(globalStats.totalDebt)}
+                          >
+                            {formatCompactCurrency(globalStats.totalDebt)}
+                          </h3>
+                        </div>
+                      </div>
+
+                      {/* LIST CHI TIẾT NỢ TOÀN CỤC */}
+                      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 mb-6">
+                        <h3 className="font-bold text-gray-800 mb-4 flex items-center gap-2">
+                          <Users size={18} className="text-blue-500" />
+                          Chi tiết công nợ (Tất cả các nhóm)
+                        </h3>
+                        <div className="space-y-2">
+                          {globalFriendStats.length === 0 ? (
+                            <p className="text-gray-400 text-center italic py-4">
+                              Hiện tại không có công nợ nào.
+                            </p>
+                          ) : (
+                            globalFriendStats.map((item, idx) => (
+                              <div
+                                key={idx}
+                                className="flex justify-between items-center p-3 hover:bg-gray-50 rounded-xl transition-colors border-b border-gray-50 last:border-0"
+                              >
+                                <div className="flex items-center gap-3">
+                                  <Avatar name={item.name} size="md" />
+                                  <div>
+                                    <p className="font-bold text-gray-800">
+                                      {item.name}
+                                    </p>
+                                    {item.email && (
+                                      <p className="text-xs text-gray-400">
+                                        {item.email}
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                                <div
+                                  className={`font-bold text-lg ${
+                                    item.amount >= 0
+                                      ? "text-emerald-600"
+                                      : "text-rose-600"
+                                  }`}
+                                >
+                                  {item.amount >= 0 ? "+" : "-"}
+                                  {formatCurrency(Math.abs(item.amount))}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+
+                      {/* --- LỊCH SỬ GIAO DỊCH TOÀN CỤC (ĐÃ SỬA: GỌN + NÚT XEM TẤT CẢ) --- */}
+                      <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 mb-8 flex flex-col h-[350px]">
+                        <div className="flex justify-between items-center mb-6 shrink-0">
+                          <h3 className="font-bold text-gray-800 flex items-center gap-2 text-lg">
+                            <History size={20} className="text-violet-500" />
+                            Hoạt động gần đây
+                          </h3>
+                          <div className="flex gap-2">
+                            {/* Nút Xem tất cả */}
+                            <button
+                              onClick={() => setIsHistoryModalOpen(true)}
+                              className="flex items-center gap-2 px-3 py-1.5 bg-gray-100 text-gray-600 rounded-lg text-xs font-bold hover:bg-gray-200 transition-colors border border-gray-200"
+                            >
+                              <span>Xem tất cả</span>
+                              <ChevronRight size={12} />
+                            </button>
+
+                            {/* Nút Tạo nhóm */}
+                            <button
+                              onClick={() => setIsCreateGroupModalOpen(true)}
+                              className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-100"
+                            >
+                              <Plus size={14} /> Tạo nhóm
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
+                          {globalHistory.length === 0 ? (
+                            <div className="h-full flex flex-col items-center justify-center text-gray-400 opacity-60">
+                              <div className="bg-gray-50 p-4 rounded-full mb-3">
+                                <History size={32} />
+                              </div>
+                              <p className="text-sm">Chưa có giao dịch nào.</p>
+                            </div>
+                          ) : (
+                            <div className="space-y-2">
+                              {globalHistory.slice(0, 10).map(
+                                (
+                                  item,
+                                  idx, // Chỉ hiện 10 tin mới nhất ở đây cho gọn
+                                ) => (
+                                  <div key={`${item.id}_${idx}`}>
+                                    {renderHistoryItem(item)}
+                                  </div>
+                                ),
+                              )}
+                              {globalHistory.length > 10 && (
+                                <p className="text-center text-xs text-gray-400 pt-4 italic">
+                                  ... và {globalHistory.length - 10} giao dịch
+                                  khác
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )
+            ) : (
+              /* ========================================================
+               TRƯỜNG HỢP 2: GROUP VIEW (KHI ĐÃ CHỌN NHÓM)
+               ======================================================== */
+              <div className="h-full flex flex-col animate-fade-in">
+                <div className="flex justify-between items-center mb-6 shrink-0">
+                  <div>
+                    <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+                      {myGroups.find((g) => g.id === groupId)?.name}
+                    </h2>
+                    <p className="text-xs text-gray-400 font-mono mt-1">
+                      ID: {groupId}
+                    </p>
+                  </div>
+                  {/* TAB SWITCHER */}
+                  {!selectedPersonId && (
+                    <div className="flex bg-gray-100 p-1 rounded-xl">
+                      <button
+                        onClick={() => setActiveTab("dashboard")}
+                        className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
+                          activeTab === "dashboard"
+                            ? "bg-white shadow text-blue-600"
+                            : "text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        <LayoutDashboard size={18} /> Tổng quan
+                      </button>
+                      <button
+                        onClick={() => setActiveTab("people")}
+                        className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
+                          activeTab === "people"
+                            ? "bg-white shadow text-blue-600"
+                            : "text-gray-500 hover:text-gray-700"
+                        }`}
+                      >
+                        <Users size={18} /> Thành viên
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex-1 overflow-hidden relative">
+                  {selectedPersonId ? (
+                    // >>> 2.1: POPUP CHI TIẾT THÀNH VIÊN <<<
+                    <div className="h-full bg-white rounded-[2rem] shadow-sm border border-gray-200 flex flex-col relative overflow-hidden animate-slide-up">
+                      <div className="p-6 border-b flex justify-between items-center bg-gray-50">
+                        <h2 className="font-bold text-xl text-gray-700">
+                          Chi tiết công nợ
+                        </h2>
+                        <button
+                          onClick={() => setSelectedPersonId(null)}
+                          className="p-2 bg-white rounded-full shadow hover:bg-gray-100"
+                        >
+                          <X size={20} />
+                        </button>
+                      </div>
+                      <div className="flex-1 overflow-y-auto p-10 custom-scrollbar">
+                        {(() => {
+                          const p = people.find(
+                            (item) => item.id === selectedPersonId,
+                          );
+                          if (!p) return null;
+                          const debt = calculateNetDebt(p.id);
+                          const related = expenses.filter(
+                            (e) =>
+                              e.sharedWith.includes(p.id) || e.payerId === p.id,
+                          );
+                          return (
+                            <div className="max-w-3xl mx-auto">
+                              <div className="flex items-center gap-8 mb-10 p-8 bg-gray-50/80 rounded-[2rem] border border-gray-100 relative">
+                                <Avatar
+                                  name={p.name}
+                                  size="lg"
+                                  className="shadow-lg"
+                                />
+                                <div>
+                                  <h2 className="text-4xl font-bold text-gray-800">
+                                    {p.name}
+                                  </h2>
+                                  {p.email && (
+                                    <p className="text-gray-500 font-medium mt-1">
+                                      {p.email}
+                                    </p>
+                                  )}
+                                  <div
+                                    className={`mt-3 inline-flex items-center px-4 py-2 rounded-xl text-lg font-bold ${
+                                      debt >= 0
+                                        ? "bg-emerald-100 text-emerald-700"
+                                        : "bg-rose-100 text-rose-700"
+                                    }`}
+                                  >
+                                    {debt >= 0
+                                      ? `Nợ tôi: ${formatCurrency(debt)}`
+                                      : `Tôi nợ: ${formatCurrency(
+                                          Math.abs(debt),
+                                        )}`}
+                                  </div>
+                                </div>
+                                {debt > 0 && (
+                                  <button
+                                    onClick={() => handleBuzz(p)}
+                                    className="absolute right-8 top-1/2 -translate-y-1/2 bg-yellow-400 hover:bg-yellow-500 text-yellow-900 px-6 py-4 rounded-2xl font-bold shadow-lg flex flex-col items-center gap-1 active:scale-95"
+                                  >
+                                    <Bell
+                                      size={24}
+                                      className="fill-current animate-pulse"
+                                    />{" "}
+                                    BUZZ!
+                                  </button>
+                                )}
+                              </div>
+                              <h3 className="font-bold text-gray-400 text-sm uppercase mb-6 flex items-center gap-4">
+                                <span className="bg-gray-200 h-px flex-1"></span>{" "}
+                                Lịch sử chung ({related.length}){" "}
+                                <span className="bg-gray-200 h-px flex-1"></span>
+                              </h3>
+                              <div className="space-y-4">
+                                {related.map((e) => renderHistoryItem(e))}
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  ) : activeTab === "people" ? (
+                    // >>> 2.2: QUẢN LÝ THÀNH VIÊN NHÓM (CHỌN TỪ DANH BẠ) <<<
+                    <div className="h-full overflow-y-auto custom-scrollbar">
+                      <div className="max-w-4xl mx-auto space-y-8 bg-white p-8 rounded-[2rem] shadow-sm border border-gray-200">
+                        {/* KHU VỰC CHỌN TỪ DANH BẠ */}
+                        <div className="bg-blue-50 p-6 rounded-2xl border border-blue-100">
+                          <h3 className="font-bold text-blue-800 mb-4 flex items-center gap-2">
+                            <Plus size={20} /> Thêm thành viên từ Danh bạ
+                          </h3>
+
+                          {contacts.length === 0 ? (
+                            <p className="text-sm text-gray-500 italic">
+                              Danh bạ trống. Hãy ra ngoài "Danh bạ bạn bè" để
+                              thêm trước.
+                            </p>
+                          ) : (
+                            <div className="flex flex-wrap gap-2">
+                              {/* Thông báo nếu đã thêm hết */}
+                              {contacts.filter(
+                                (c) => !people.some((p) => p.id === c.id),
+                              ).length === 0 && (
+                                <p className="text-sm text-gray-500 italic">
+                                  Tất cả bạn bè đã có trong nhóm này.
+                                </p>
+                              )}
+
+                              {/* Nút bấm thêm nhanh */}
+                              {contacts
+                                .filter(
+                                  (c) => !people.some((p) => p.id === c.id),
+                                ) // Chỉ hiện người CHƯA ở trong nhóm
+                                .map((contact) => (
+                                  <button
+                                    key={contact.id}
+                                    onClick={() => addContactToGroup(contact)}
+                                    className="flex items-center gap-2 px-4 py-2 bg-white rounded-xl border border-blue-200 shadow-sm hover:shadow-md hover:border-blue-500 hover:text-blue-600 transition-all text-sm font-bold text-gray-700"
+                                  >
+                                    <Avatar name={contact.name} size="sm" />
+                                    {contact.name}
+                                    <Plus size={14} className="ml-1" />
+                                  </button>
+                                ))}
+                            </div>
+                          )}
+                          <div className="mt-4 pt-4 border-t border-blue-100">
+                            <p className="text-xs text-blue-400 italic">
+                              * Muốn thêm người mới hoàn toàn? Hãy quay lại tab
+                              "Danh bạ bạn bè" ở ngoài trang chủ.
+                            </p>
+                          </div>
+                        </div>
+
+                        <h3 className="font-bold text-xl text-gray-800 flex items-center gap-2">
+                          Thành viên hiện tại{" "}
+                          <span className="text-sm bg-gray-100 text-gray-500 px-2 py-1 rounded-lg">
+                            {people.length}
+                          </span>
+                        </h3>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          {people.map((p) => (
+                            <div
+                              key={p.id}
+                              className="p-4 bg-gray-50 rounded-2xl flex justify-between items-center group hover:bg-white hover:shadow-md transition-all border border-transparent hover:border-gray-100"
+                            >
+                              <div className="flex items-center gap-4">
+                                <Avatar name={p.name} size="md" />
+                                <div>
+                                  <div className="font-bold text-lg text-gray-700">
+                                    {p.name}
+                                  </div>
+                                  {p.email && (
+                                    <div className="text-sm text-gray-400">
+                                      {p.email}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                              {/* Nút xóa thành viên (chỉ hiện nếu không phải chính mình) */}
+                              {p.id !== user?.uid && (
+                                <button
+                                  onClick={() => deletePerson(p.id)}
+                                  className="text-gray-300 hover:text-red-500 p-2 bg-white rounded-xl shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
+                                  title="Xóa khỏi nhóm"
+                                >
+                                  <Trash2 size={20} />
                                 </button>
                               )}
                             </div>
-                            <h3 className="font-bold text-gray-400 text-sm uppercase mb-6 flex items-center gap-4">
-                              <span className="bg-gray-200 h-px flex-1"></span>{" "}
-                              Lịch sử chung ({related.length}){" "}
-                              <span className="bg-gray-200 h-px flex-1"></span>
-                            </h3>
-                            <div className="space-y-4">
-                              {related.map((e) => renderHistoryItem(e))}
-                            </div>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  </div>
-                ) : activeTab === "people" ? (
-                  // >>> 2.2: QUẢN LÝ THÀNH VIÊN NHÓM (CHỌN TỪ DANH BẠ) <<<
-                  <div className="h-full overflow-y-auto custom-scrollbar">
-                    <div className="max-w-4xl mx-auto space-y-8 bg-white p-8 rounded-[2rem] shadow-sm border border-gray-200">
-                      {/* KHU VỰC CHỌN TỪ DANH BẠ */}
-                      <div className="bg-blue-50 p-6 rounded-2xl border border-blue-100">
-                        <h3 className="font-bold text-blue-800 mb-4 flex items-center gap-2">
-                          <Plus size={20} /> Thêm thành viên từ Danh bạ
-                        </h3>
-
-                        {contacts.length === 0 ? (
-                          <p className="text-sm text-gray-500 italic">
-                            Danh bạ trống. Hãy ra ngoài "Danh bạ bạn bè" để thêm
-                            trước.
-                          </p>
-                        ) : (
-                          <div className="flex flex-wrap gap-2">
-                            {/* Thông báo nếu đã thêm hết */}
-                            {contacts.filter(
-                              (c) => !people.some((p) => p.id === c.id),
-                            ).length === 0 && (
-                              <p className="text-sm text-gray-500 italic">
-                                Tất cả bạn bè đã có trong nhóm này.
-                              </p>
-                            )}
-
-                            {/* Nút bấm thêm nhanh */}
-                            {contacts
-                              .filter((c) => !people.some((p) => p.id === c.id)) // Chỉ hiện người CHƯA ở trong nhóm
-                              .map((contact) => (
-                                <button
-                                  key={contact.id}
-                                  onClick={() => addContactToGroup(contact)}
-                                  className="flex items-center gap-2 px-4 py-2 bg-white rounded-xl border border-blue-200 shadow-sm hover:shadow-md hover:border-blue-500 hover:text-blue-600 transition-all text-sm font-bold text-gray-700"
-                                >
-                                  <Avatar name={contact.name} size="sm" />
-                                  {contact.name}
-                                  <Plus size={14} className="ml-1" />
-                                </button>
-                              ))}
-                          </div>
-                        )}
-                        <div className="mt-4 pt-4 border-t border-blue-100">
-                          <p className="text-xs text-blue-400 italic">
-                            * Muốn thêm người mới hoàn toàn? Hãy quay lại tab
-                            "Danh bạ bạn bè" ở ngoài trang chủ.
-                          </p>
+                          ))}
                         </div>
                       </div>
-
-                      <h3 className="font-bold text-xl text-gray-800 flex items-center gap-2">
-                        Thành viên hiện tại{" "}
-                        <span className="text-sm bg-gray-100 text-gray-500 px-2 py-1 rounded-lg">
-                          {people.length}
-                        </span>
-                      </h3>
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {people.map((p) => (
-                          <div
-                            key={p.id}
-                            className="p-4 bg-gray-50 rounded-2xl flex justify-between items-center group hover:bg-white hover:shadow-md transition-all border border-transparent hover:border-gray-100"
-                          >
-                            <div className="flex items-center gap-4">
-                              <Avatar name={p.name} size="md" />
-                              <div>
-                                <div className="font-bold text-lg text-gray-700">
-                                  {p.name}
-                                </div>
-                                {p.email && (
-                                  <div className="text-sm text-gray-400">
-                                    {p.email}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                            {/* Nút xóa thành viên (chỉ hiện nếu không phải chính mình) */}
-                            {p.id !== user?.uid && (
-                              <button
-                                onClick={() => deletePerson(p.id)}
-                                className="text-gray-300 hover:text-red-500 p-2 bg-white rounded-xl shadow-sm opacity-0 group-hover:opacity-100 transition-opacity"
-                                title="Xóa khỏi nhóm"
-                              >
-                                <Trash2 size={20} />
-                              </button>
-                            )}
-                          </div>
-                        ))}
-                      </div>
                     </div>
-                  </div>
-                ) : (
-                  // >>> 2.3: DASHBOARD NHÓM (GRID CÔNG NỢ & LỊCH SỬ) <<<
-                  <div className="flex flex-col h-full gap-4">
-                    {/* Grid Nợ & Stats */}
-                    <div className="flex flex-col md:flex-row gap-4 shrink-0 h-[40%] min-h-[300px]">
-                      <div className="flex-1 flex flex-col min-h-0">
-                        <h2 className="font-bold text-gray-700 flex items-center gap-2 mb-2 text-base shrink-0">
-                          <Users size={18} className="text-blue-500" /> Bảng
-                          công nợ
-                        </h2>
-                        <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar pb-2">
-                          <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
-                            {/* LỌC BỎ CHÍNH MÌNH (user.uid) KHỎI GRID */}
-                            {sortedPeople
-                              .filter((p) => p.id !== user?.uid)
-                              .map((person) => {
-                                const debt = calculateNetDebt(person.id);
-                                return (
-                                  <div
-                                    key={person.id}
-                                    onClick={() =>
-                                      setSelectedPersonId(person.id)
-                                    }
-                                    className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 cursor-pointer hover:shadow-md hover:-translate-y-1 hover:border-blue-300 transition-all flex flex-col items-center text-center relative group"
-                                  >
-                                    {/* NÚT BUZZ */}
-                                    {debt > 0 && (
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleBuzz(person);
-                                        }}
-                                        className="absolute top-2 right-2 text-yellow-600 bg-yellow-50 p-1.5 rounded-full hover:bg-yellow-200 hover:scale-110 transition-all shadow-sm z-10"
-                                      >
-                                        <Bell
-                                          size={14}
-                                          className="fill-current"
-                                        />
-                                      </button>
-                                    )}
-                                    {/* NÚT CHECK (SETTLE) */}
-                                    {debt > 0 && (
-                                      <button
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleSettleAll(person);
-                                        }}
-                                        className="absolute top-2 left-2 text-emerald-600 bg-emerald-50 p-1.5 rounded-full hover:bg-emerald-200 hover:scale-110 transition-all shadow-sm z-10"
-                                        title="Xác nhận người này đã trả hết tiền cho tôi"
-                                      >
-                                        <Check size={14} strokeWidth={3} />
-                                      </button>
-                                    )}
-
-                                    <Avatar
-                                      name={person.name}
-                                      size="md"
-                                      className="mb-2 shadow-sm"
-                                    />
-                                    <p className="font-bold text-gray-800 text-sm line-clamp-1 w-full px-1">
-                                      {person.name}
-                                    </p>
+                  ) : (
+                    // >>> 2.3: DASHBOARD NHÓM (GRID CÔNG NỢ & LỊCH SỬ) <<<
+                    <div className="flex flex-col h-full gap-4">
+                      {/* Grid Nợ & Stats */}
+                      <div className="flex flex-col md:flex-row gap-4 shrink-0 h-[40%] min-h-[300px]">
+                        <div className="flex-1 flex flex-col min-h-0">
+                          <h2 className="font-bold text-gray-700 flex items-center gap-2 mb-2 text-base shrink-0">
+                            <Users size={18} className="text-blue-500" /> Bảng
+                            công nợ
+                          </h2>
+                          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar pb-2">
+                            <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
+                              {/* LỌC BỎ CHÍNH MÌNH (user.uid) KHỎI GRID */}
+                              {sortedPeople
+                                .filter((p) => p.id !== user?.uid)
+                                .map((person) => {
+                                  const debt = calculateNetDebt(person.id);
+                                  return (
                                     <div
-                                      className={`mt-1 font-extrabold text-lg tracking-tight ${
-                                        debt >= 0
-                                          ? "text-emerald-600"
-                                          : "text-rose-600"
-                                      }`}
+                                      key={person.id}
+                                      onClick={() =>
+                                        setSelectedPersonId(person.id)
+                                      }
+                                      className="bg-white p-3 rounded-2xl shadow-sm border border-gray-100 cursor-pointer hover:shadow-md hover:-translate-y-1 hover:border-blue-300 transition-all flex flex-col items-center text-center relative group"
                                     >
-                                      {formatCurrency(Math.abs(debt))}
+                                      {/* NÚT BUZZ */}
+                                      {debt > 0 && (
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleBuzz(person);
+                                          }}
+                                          className="absolute top-2 right-2 text-yellow-600 bg-yellow-50 p-1.5 rounded-full hover:bg-yellow-200 hover:scale-110 transition-all shadow-sm z-10"
+                                        >
+                                          <Bell
+                                            size={14}
+                                            className="fill-current"
+                                          />
+                                        </button>
+                                      )}
+                                      {/* NÚT CHECK (SETTLE) */}
+                                      {debt > 0 && (
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            handleSettleAll(person);
+                                          }}
+                                          className="absolute top-2 left-2 text-emerald-600 bg-emerald-50 p-1.5 rounded-full hover:bg-emerald-200 hover:scale-110 transition-all shadow-sm z-10"
+                                          title="Xác nhận người này đã trả hết tiền cho tôi"
+                                        >
+                                          <Check size={14} strokeWidth={3} />
+                                        </button>
+                                      )}
+
+                                      <Avatar
+                                        name={person.name}
+                                        size="md"
+                                        className="mb-2 shadow-sm"
+                                      />
+                                      <p className="font-bold text-gray-800 text-sm line-clamp-1 w-full px-1">
+                                        {person.name}
+                                      </p>
+                                      <div
+                                        className={`mt-1 font-extrabold text-lg tracking-tight ${
+                                          debt >= 0
+                                            ? "text-emerald-600"
+                                            : "text-rose-600"
+                                        }`}
+                                      >
+                                        {formatCurrency(Math.abs(debt))}
+                                      </div>
+                                      <span
+                                        className={`text-[9px] font-bold uppercase tracking-wider mt-1 px-1.5 py-0.5 rounded-md ${
+                                          debt >= 0
+                                            ? "bg-emerald-50 text-emerald-600"
+                                            : "bg-rose-50 text-rose-600"
+                                        }`}
+                                      >
+                                        {debt >= 0 ? "Nợ tôi" : "Tôi nợ"}
+                                      </span>
                                     </div>
-                                    <span
-                                      className={`text-[9px] font-bold uppercase tracking-wider mt-1 px-1.5 py-0.5 rounded-md ${
-                                        debt >= 0
-                                          ? "bg-emerald-50 text-emerald-600"
-                                          : "bg-rose-50 text-rose-600"
-                                      }`}
-                                    >
-                                      {debt >= 0 ? "Nợ tôi" : "Tôi nợ"}
-                                    </span>
-                                  </div>
-                                );
-                              })}
+                                  );
+                                })}
 
-                            {/* NÚT THÊM THÀNH VIÊN NHANH TRONG GRID */}
-                            <div
-                              onClick={() => setActiveTab("people")}
-                              className="bg-gray-50 p-3 rounded-2xl border-2 border-dashed border-gray-300 cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-all flex flex-col items-center justify-center text-center group min-h-[120px]"
-                            >
-                              <div className="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center text-gray-400 group-hover:text-blue-500 mb-2 transition-colors">
-                                <Plus size={20} />
+                              {/* NÚT THÊM THÀNH VIÊN NHANH TRONG GRID */}
+                              <div
+                                onClick={() => setActiveTab("people")}
+                                className="bg-gray-50 p-3 rounded-2xl border-2 border-dashed border-gray-300 cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-all flex flex-col items-center justify-center text-center group min-h-[120px]"
+                              >
+                                <div className="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center text-gray-400 group-hover:text-blue-500 mb-2 transition-colors">
+                                  <Plus size={20} />
+                                </div>
+                                <span className="text-xs font-bold text-gray-400 group-hover:text-blue-600 transition-colors">
+                                  Thêm thành viên
+                                </span>
                               </div>
-                              <span className="text-xs font-bold text-gray-400 group-hover:text-blue-600 transition-colors">
-                                Thêm thành viên
-                              </span>
                             </div>
                           </div>
                         </div>
-                      </div>
-                      {/* Cột Stats */}
-                      <div className="w-full md:w-64 xl:w-72 flex flex-col shrink-0">
-                        <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-5 text-white shadow-lg shadow-blue-200/50 relative overflow-hidden h-full flex flex-col justify-center">
-                          <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
-                          <div className="mb-4 text-center md:text-left relative z-10">
-                            <p className="opacity-80 font-bold text-xs uppercase tracking-wider mb-1">
-                              Tài sản ròng (Nhóm này)
-                            </p>
-                            <h3
-                              className="text-3xl xl:text-4xl font-bold tracking-tighter truncate"
-                              title={formatCurrency(totalOwedToMe - totalIOwe)}
-                            >
-                              {formatCompactCurrency(totalOwedToMe - totalIOwe)}
-                            </h3>
-                          </div>
-                          <div className="space-y-3 relative z-10">
-                            <div className="bg-white/10 p-3 rounded-xl backdrop-blur-md border border-white/10 flex items-center gap-3">
-                              <div className="p-2 bg-emerald-500/20 rounded-lg">
-                                <TrendingUp
-                                  size={18}
-                                  className="text-emerald-300"
-                                />
-                              </div>
-                              <div className="min-w-0">
-                                <p className="text-[9px] opacity-80 uppercase font-bold">
-                                  Cần thu
-                                </p>
-                                <p
-                                  className="font-bold text-lg text-emerald-300 truncate"
-                                  title={formatCurrency(totalOwedToMe)}
-                                >
-                                  {formatCompactCurrency(totalOwedToMe)}
-                                </p>
-                              </div>
+                        {/* Cột Stats */}
+                        <div className="w-full md:w-64 xl:w-72 flex flex-col shrink-0">
+                          <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-5 text-white shadow-lg shadow-blue-200/50 relative overflow-hidden h-full flex flex-col justify-center">
+                            <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
+                            <div className="mb-4 text-center md:text-left relative z-10">
+                              <p className="opacity-80 font-bold text-xs uppercase tracking-wider mb-1">
+                                Tài sản ròng (Nhóm này)
+                              </p>
+                              <h3
+                                className="text-3xl xl:text-4xl font-bold tracking-tighter truncate"
+                                // [FIX] Thay bằng myNetBalance
+                                title={formatCurrency(displayNetBalance)}
+                              >
+                                {formatCompactCurrency(displayNetBalance)}
+                              </h3>
                             </div>
-                            <div className="bg-white/10 p-3 rounded-xl backdrop-blur-md border border-white/10 flex items-center gap-3">
-                              <div className="p-2 bg-rose-500/20 rounded-lg">
-                                <TrendingDown
-                                  size={18}
-                                  className="text-rose-300"
-                                />
+                            <div className="space-y-3 relative z-10">
+                              <div className="bg-white/10 p-3 rounded-xl backdrop-blur-md border border-white/10 flex items-center gap-3">
+                                <div className="p-2 bg-emerald-500/20 rounded-lg">
+                                  <TrendingUp
+                                    size={18}
+                                    className="text-emerald-300"
+                                  />
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-[9px] opacity-80 uppercase font-bold">
+                                    Cần thu
+                                  </p>
+                                  <p
+                                    className="font-bold text-lg text-emerald-300 truncate"
+                                    // [FIX] Thay bằng myTotalReceivable
+                                    title={formatCurrency(displayReceivable)}
+                                  >
+                                    {formatCompactCurrency(displayReceivable)}
+                                  </p>
+                                </div>
                               </div>
-                              <div className="min-w-0">
-                                <p className="text-[9px] opacity-80 uppercase font-bold">
-                                  Cần trả
-                                </p>
-                                <p
-                                  className="font-bold text-lg text-rose-300 truncate"
-                                  title={formatCurrency(totalIOwe)}
-                                >
-                                  {formatCompactCurrency(totalIOwe)}
-                                </p>
+                              <div className="bg-white/10 p-3 rounded-xl backdrop-blur-md border border-white/10 flex items-center gap-3">
+                                <div className="p-2 bg-rose-500/20 rounded-lg">
+                                  <TrendingDown
+                                    size={18}
+                                    className="text-rose-300"
+                                  />
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-[9px] opacity-80 uppercase font-bold">
+                                    Cần trả
+                                  </p>
+                                  <p
+                                    className="font-bold text-lg text-rose-300 truncate"
+                                    // [FIX] Thay bằng myTotalPayable
+                                    title={formatCurrency(displayPayable)}
+                                  >
+                                    {formatCompactCurrency(displayPayable)}
+                                  </p>
+                                </div>
                               </div>
                             </div>
                           </div>
                         </div>
                       </div>
-                    </div>
 
-                    {/* Lịch sử giao dịch */}
-                    <div className="flex-1 bg-white rounded-2xl shadow-sm border border-gray-200 flex flex-col min-h-0 overflow-hidden">
-                      <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
-                        <h2 className="font-bold text-gray-800 flex items-center gap-2 text-base">
-                          <History size={20} className="text-violet-500" /> Giao
-                          dịch gần đây
-                        </h2>
-                        <button
-                          onClick={() => setIsHistoryModalOpen(true)}
-                          className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-600 hover:bg-violet-50 hover:text-violet-600 transition-all shadow-sm"
-                        >
-                          <span>Xem tất cả ({expenses.length})</span>
-                          <div className="bg-gray-100 p-1 rounded">
-                            <ChevronRight size={12} />
-                          </div>
-                        </button>
-                      </div>
-                      <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                        {expenses.length === 0 && (
-                          <div className="text-center text-gray-400 mt-10 text-sm">
-                            Chưa có giao dịch nào
-                          </div>
-                        )}
-                        {expenses.slice(0, 50).map((e) => renderHistoryItem(e))}
+                      {/* Lịch sử giao dịch */}
+                      <div className="flex-1 bg-white rounded-2xl shadow-sm border border-gray-200 flex flex-col min-h-0 overflow-hidden">
+                        <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
+                          <h2 className="font-bold text-gray-800 flex items-center gap-2 text-base">
+                            <History size={20} className="text-violet-500" />{" "}
+                            Giao dịch gần đây
+                          </h2>
+                          <button
+                            onClick={() => setIsHistoryModalOpen(true)}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-600 hover:bg-violet-50 hover:text-violet-600 transition-all shadow-sm"
+                          >
+                            <span>Xem tất cả ({expenses.length})</span>
+                            <div className="bg-gray-100 p-1 rounded">
+                              <ChevronRight size={12} />
+                            </div>
+                          </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                          {expenses.length === 0 && (
+                            <div className="text-center text-gray-400 mt-10 text-sm">
+                              Chưa có giao dịch nào
+                            </div>
+                          )}
+                          {expenses
+                            .slice(0, 50)
+                            .map((e) => renderHistoryItem(e))}
+                        </div>
                       </div>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
-            </div>
-          )}
-        </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
