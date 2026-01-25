@@ -1,5 +1,11 @@
 {
   "appId": "com.sonnx.splitmoney",
   "appName": "SplitMoney",
-  "webDir": "dist"
+  "webDir": "dist",
+  "plugins": {
+    "FirebaseAuthentication": {
+      "skipNativeAuth": false,
+      "providers": ["google.com"]
+    }
+  }
 }

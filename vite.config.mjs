@@ -1,8 +1,9 @@
-import { defineConfig } from 'vite'
-import react from '@vitejs/plugin-react'
+// split-money-app/vite.config.mjs
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
-  base: './',
-})
+  base: "./",
+  // Không cần setting server.headers nữa vì Electron đã xử lý rồi
+});
