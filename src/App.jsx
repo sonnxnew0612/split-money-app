@@ -119,7 +119,7 @@ const GROUP_ICONS = [
 const Toast = ({ message, type = "error", onClose }) => {
   if (!message) return null;
   return (
-    <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[200] animate-fade-in-down">
+    <div className="fixed top-14 left-1/2 -translate-x-1/2 z-[200] animate-fade-in-down">
       <div
         className={`flex items-center gap-3 px-6 py-3 rounded-full shadow-2xl shadow-black/20 backdrop-blur-md border ${
           type === "error"
@@ -1523,7 +1523,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
         <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-6 text-white text-center relative">
           <button
             onClick={onClose}
-            className="absolute top-4 right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all shadow-sm"
+            className="absolute top-12 md:top-4 right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all shadow-sm"
           >
             <X size={20} />
           </button>
@@ -2291,8 +2291,22 @@ export default function App() {
               const getShare = (uid) => {
                 if (exp.type === "custom")
                   return parseFloat(exp.customShares?.[uid] || 0);
-                let count = exp.sharedWith.length;
-                if (exp.type === "split") count += 1;
+
+                let count = exp.sharedWith.length; // <--- BẠN ĐANG CÓ DÒNG NÀY
+
+                // --- HÃY DÁN ĐOẠN FIX VÀO NGAY SAU DÒNG TRÊN ---
+                if (exp.type === "full") {
+                  const realPayerId =
+                    exp.payerId === "me" ? user?.uid : exp.payerId;
+                  const validDebtors = exp.sharedWith.filter((id) => {
+                    const realId = id === "me" ? user?.uid : id;
+                    return realId !== realPayerId;
+                  });
+                  count = validDebtors.length;
+                }
+                if (count === 0) return 0;
+                // ------------------------------------------------
+
                 return amount / count;
               };
 
@@ -2825,9 +2839,20 @@ export default function App() {
         if (exp.type === "custom") {
           return parseFloat(exp.customShares?.[uid] || 0);
         } else {
-          // Logic cũ: split chia đều (số người shared + 1 payer), full/borrow chia đều (số người shared)
-          let count = exp.sharedWith.length;
-          if (exp.type === "split") count += 1;
+          let count = exp.sharedWith.length; // <--- BẠN ĐANG CÓ DÒNG NÀY
+
+          // --- HÃY DÁN ĐOẠN FIX VÀO NGAY SAU DÒNG TRÊN ---
+          if (exp.type === "full") {
+            const realPayerId = exp.payerId === "me" ? user?.uid : exp.payerId;
+            const validDebtors = exp.sharedWith.filter((id) => {
+              const realId = id === "me" ? user?.uid : id;
+              return realId !== realPayerId;
+            });
+            count = validDebtors.length;
+          }
+          if (count === 0) return 0;
+          // ------------------------------------------------
+
           return amount / count;
         }
       };
@@ -2875,6 +2900,7 @@ export default function App() {
   );
 
   // --- [FIX LOGIC] TÍNH TOÁN SONG PHƯƠNG (GIỐNG GLOBAL DASHBOARD) ---
+  // --- [FIX LOGIC] TÍNH TOÁN SONG PHƯƠNG (GIỐNG GLOBAL DASHBOARD) ---
   const groupStats = useMemo(() => {
     if (!user || !groupId) return { net: 0, receivable: 0, payable: 0 };
 
@@ -2895,8 +2921,21 @@ export default function App() {
         const getShare = (uid) => {
           if (exp.type === "custom")
             return parseFloat(exp.customShares?.[uid] || 0);
-          let count = exp.sharedWith.length;
-          if (exp.type === "split") count += 1;
+
+          let count = exp.sharedWith.length; // <--- BẠN ĐANG CÓ DÒNG NÀY
+
+          // --- HÃY DÁN ĐOẠN FIX VÀO NGAY SAU DÒNG TRÊN ---
+          if (exp.type === "full") {
+            const realPayerId = exp.payerId === "me" ? user?.uid : exp.payerId;
+            const validDebtors = exp.sharedWith.filter((id) => {
+              const realId = id === "me" ? user?.uid : id;
+              return realId !== realPayerId;
+            });
+            count = validDebtors.length;
+          }
+          if (count === 0) return 0;
+          // ------------------------------------------------
+
           return amount / count;
         };
 
@@ -3697,6 +3736,34 @@ export default function App() {
                 <label className="block text-sm font-bold text-blue-800 mb-3 flex items-center gap-2">
                   <Users size={16} /> Chọn thành viên từ Danh bạ
                 </label>
+                {/* NÚT CHỌN TẤT CẢ (MỚI) */}
+                {contacts.length > 0 && (
+                  <div className="flex justify-end mb-2">
+                    <button
+                      onClick={() => {
+                        if (tempMembers.length === contacts.length) {
+                          // Nếu đang chọn hết -> Bỏ chọn tất cả
+                          setTempMembers([]);
+                        } else {
+                          // Nếu chưa chọn hết -> Chọn tất cả
+                          const allMembers = contacts.map((c) => ({
+                            id: c.id,
+                            name: c.name,
+                            email: c.email,
+                            role: "member",
+                          }));
+                          setTempMembers(allMembers);
+                        }
+                      }}
+                      className="text-xs font-bold text-blue-600 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors"
+                    >
+                      {tempMembers.length === contacts.length
+                        ? "Bỏ chọn tất cả"
+                        : "Chọn tất cả"}
+                    </button>
+                  </div>
+                )}
+                {/* --------------------------- */}
 
                 {contacts.length === 0 ? (
                   <div className="text-center py-4 text-gray-500 text-sm italic border-2 border-dashed border-gray-200 rounded-xl bg-white/50">
@@ -3911,7 +3978,7 @@ export default function App() {
           </button>
 
           {/* Render List Nhóm */}
-          {myGroups.map((g) => (
+          {[...myGroups].reverse().map((g) => (
             <button
               key={g.id}
               onClick={() => {
@@ -4077,7 +4144,7 @@ export default function App() {
         {isMobileView && (
           <div className="md:hidden flex flex-col h-full bg-gray-50">
             {/* 1. HEADER MOBILE (Dynamic: Global hoặc Group) */}
-            <div className="bg-gradient-to-br from-blue-600 to-indigo-700 px-6 pt-10 pb-20 shrink-0 text-white shadow-md z-20 rounded-b-[2rem] relative overflow-hidden">
+            <div className="bg-gradient-to-br from-blue-600 to-indigo-700 px-6 pt-16 pb-20 shrink-0 text-white shadow-md z-20 rounded-b-[2rem] relative overflow-hidden">
               {/* Background Decor */}
               <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
 
@@ -4282,7 +4349,7 @@ export default function App() {
                         </div>
                       ) : (
                         <div className="space-y-3">
-                          {myGroups.map((g) => (
+                          {[...myGroups].reverse().map((g) => (
                             // Container vuốt ngang (Scroll Snap)
                             <div
                               key={g.id}
