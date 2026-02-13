@@ -1,120 +1,13 @@
-name: Build iOS IPA (Unsigned)
+ame: Build iOS IPA (Unsigned)
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build-ios:
     runs-on: macos-latest
-<<<<<<< HEAD
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 18
-
-      - name: Install Dependencies
-        run: |
-          rm -rf package-lock.json node_modules
-          npm install
-
-      # --- BƯỚC FIX QUAN TRỌNG: TỰ TẠO FILE Package.swift CHUẨN ---
-      - name: Fix @capacitor-firebase/authentication Package.swift
-        run: |
-          cd node_modules/@capacitor-firebase/authentication
-
-          # 1. Tìm tên file .m trong ios/Plugin để loại trừ (tránh lỗi mixed language)
-          # Lệnh này tìm file đuôi .m và lấy tên file
-          M_FILE=$(ls ios/Plugin/*.m | xargs basename)
-          echo "Found .m file to exclude: $M_FILE"
-
-          # 2. Tạo file Package.swift hoàn chỉnh
-          # - Thêm dependency Firebase iOS SDK (quan trọng)
-          # - Loại trừ file .m đã tìm thấy ở trên
-          cat <<EOF > Package.swift
-          // swift-tools-version: 5.9
-          import PackageDescription
-
-          let package = Package(
-              name: "CapacitorFirebaseAuthentication",
-              platforms: [.iOS(.v13)],
-              products: [
-                  .library(
-                      name: "CapacitorFirebaseAuthentication",
-                      targets: ["CapacitorFirebaseAuthentication"])
-              ],
-              dependencies: [
-                  .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "6.0.0"),
-                  .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "10.0.0")
-              ],
-              targets: [
-                  .target(
-                      name: "CapacitorFirebaseAuthentication",
-                      dependencies: [
-                          .product(name: "Capacitor", package: "capacitor-swift-pm"),
-                          .product(name: "Cordova", package: "capacitor-swift-pm"),
-                          .product(name: "FirebaseAuth", package: "firebase-ios-sdk")
-                      ],
-                      path: "ios/Plugin",
-                      exclude: ["$M_FILE"]
-                  )
-              ]
-          )
-          EOF
-
-          echo "✅ Created custom Package.swift successfully!"
-          # In ra để kiểm tra
-          cat Package.swift
-      # -----------------------------------------------------------
-      - name: Build React App
-        run: npm run build
-
-      - name: Sync Capacitor
-        run: npx cap sync ios
-
-      - name: Link GoogleService-Info.plist to Xcode Project
-        run: |
-          gem install xcodeproj
-          ruby -e '
-            require "xcodeproj"
-            project_path = "ios/App/App.xcodeproj"
-            file_name = "GoogleService-Info.plist"
-            file_path = "ios/App/App/GoogleService-Info.plist"
-            project = Xcodeproj::Project.open(project_path)
-            group = project.main_group["App"]
-            unless group.files.find { |f| f.path == file_name }
-              file_ref = group.new_file(file_name)
-              target = project.targets.first
-              target.add_resources([file_ref])
-              project.save
-              puts "Linked #{file_name} successfully!"
-            else
-              puts "#{file_name} already exists."
-            end
-          '
-
-      - name: Build Archive (xcodebuild)
-        run: |
-          cd ios/App
-          xcodebuild -project App.xcodeproj -scheme App -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO clean build
-
-      - name: Create IPA manually
-        run: |
-          mkdir -p Payload
-          cp -r ios/App/build/Build/Products/Release-iphoneos/App.app Payload/
-          zip -r SplitMoney.ipa Payload
-
-      - name: Upload Artifact (IPA)
-        uses: actions/upload-artifact@v4
-        with:
-          name: SplitMoney-iOS
-          path: SplitMoney.ipa
-=======
     
     steps:
     - uses: actions/checkout@v4
@@ -199,7 +92,6 @@ jobs:
             project.save
             puts "✅ Đã thêm GoogleService-Info.plist vào Xcode Project"
           end
-
           # B. LẤY MÃ REVERSED_CLIENT_ID VÀ CẤU HÌNH URL SCHEME
           if File.exist?(google_plist_path)
             google_data = Plist::parse_xml(google_plist_path)
@@ -247,4 +139,3 @@ jobs:
       with:
         name: SplitMoney-iOS
         path: SplitMoney.ipa
->>>>>>> a182c4838cb86aef730f2d4a0d0802d65f67d463
