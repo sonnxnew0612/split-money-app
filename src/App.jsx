@@ -2440,25 +2440,41 @@ export default function App() {
 
       // Tìm đoạn listener "registration" và sửa lại thế này:
       PushNotifications.addListener("registration", async (token) => {
-        console.log("Push token:", token.value);
+        console.log("Thiết bị đã cấp Token:", token.value);
+
         if (auth.currentUser) {
-          // 1. Lưu vào Firestore (như cũ)
+          const uid = auth.currentUser.uid;
+
+          // 1. Cập nhật Firestore
           await setDoc(
-            doc(db, "users", auth.currentUser.uid),
-            {
-              fcmToken: token.value,
-            },
+            doc(db, "users", uid),
+            { fcmToken: token.value },
             { merge: true },
           );
 
-          // 2. [QUAN TRỌNG]: Gửi lên Cloudflare Worker KV để Server biết đường mà gửi
-          const currentDataRaw = await fetch(
-            `${API_URL}?uid=${auth.currentUser.uid}`,
-          ).then((r) => r.json());
-          await fetch(`${API_URL}?uid=${auth.currentUser.uid}`, {
-            method: "POST",
-            body: JSON.stringify({ ...currentDataRaw, fcmToken: token.value }),
-          });
+          // 2. [QUAN TRỌNG]: ÉP ĐỒNG BỘ SANG CLOUDFLARE KV
+          try {
+            // Lấy dữ liệu hiện tại từ Cloudflare
+            const res = await fetch(`${API_URL}?uid=${uid}`);
+            let userData = { people: [], expenses: [] };
+            if (res.ok) {
+              userData = await res.json();
+            }
+
+            // Kiểm tra nếu Token trong KV khác với Token máy vừa cấp thì mới update
+            if (userData.fcmToken !== token.value) {
+              await fetch(`${API_URL}?uid=${uid}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...userData, fcmToken: token.value }),
+              });
+              console.log(
+                "Đã vá lỗi thiếu Token trên Cloudflare KV thành công!",
+              );
+            }
+          } catch (e) {
+            console.error("Lỗi khi vá Token sang Cloudflare:", e);
+          }
         }
       });
 
