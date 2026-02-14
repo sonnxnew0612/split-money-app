@@ -2656,6 +2656,18 @@ export default function App() {
         }
 
         fetchDataFromServer(currentUser.uid);
+
+        // ==========================================
+        // ---> THÊM ĐOẠN NÀY: ÉP LẤY TOKEN SAU KHI ĐĂNG NHẬP <---
+        // ==========================================
+        if (Capacitor.isNativePlatform()) {
+          PushNotifications.requestPermissions().then((result) => {
+            if (result.receive === "granted") {
+              PushNotifications.register();
+            }
+          });
+        }
+        // ==========================================
       }
     });
     return () => {
@@ -3772,27 +3784,40 @@ export default function App() {
     }
   };
 
-  // --- LOGIC BUZZ (GIỤC NỢ) ---
+  // --- LOGIC BUZZ (GIỤC NỢ) TỐI ƯU ---
   const handleBuzz = async (person) => {
     if (!person.id) {
       showToast(`Lỗi: Không tìm thấy ID của ${person.name}!`, "error");
       return;
     }
 
-    // 1. Phát âm thanh ở máy mình trước cho vui tai
-    playBuzzSound();
-    showToast(`Đã BUZZ tới ${person.name}!`, "buzz");
-
-    // 2. Gọi API lên Backend của bạn để nhờ Backend bắn thông báo FCM
     try {
+      // 1. Kéo thẳng FCM Token của người nợ từ Firestore
+      const userDocRef = doc(db, "users", person.id);
+      const userSnap = await getDoc(userDocRef);
+
+      if (!userSnap.exists() || !userSnap.data().fcmToken) {
+        showToast(
+          `Không thể Buzz! ${person.name} chưa cài app hoặc chưa bật thông báo.`,
+          "error",
+        );
+        return;
+      }
+
+      const targetFcmToken = userSnap.data().fcmToken;
+
+      // 2. Phát âm thanh ở máy mình trước cho vui tai
+      playBuzzSound();
+      showToast(`Đã BUZZ tới ${person.name}!`, "buzz");
+
+      // 3. Gửi Token thẳng lên Backend để đẩy thông báo
       const response = await fetch(`${API_URL}/buzz`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          targetUserId: person.id, // Gửi ID của người nợ lên Backend
-          senderName: user.displayName || user.email.split("@")[0], // Tên của bạn
+          fcmToken: targetFcmToken, // Truyền thẳng token lên đây
           title: "Bíp bíp! Đòi nợ!!! 💸",
           body: `${
             user.displayName || "Ai đó"
