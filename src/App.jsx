@@ -115,6 +115,20 @@ const GROUP_ICONS = [
   "🎁",
 ];
 
+const playBuzzSound = () => {
+  try {
+    const audio = new Audio("/buzz.mp3");
+    audio.play();
+
+    // Nếu bạn muốn rung điện thoại (cần hỗ trợ từ trình duyệt/Capacitor)
+    if (navigator.vibrate) {
+      navigator.vibrate([200, 100, 200, 100, 500]); // Rung tít tít... tíiiit
+    }
+  } catch (e) {
+    console.error("Lỗi phát âm thanh:", e);
+  }
+};
+
 // --- COMPONENTS ---
 const Toast = ({ message, type = "error", onClose }) => {
   if (!message) return null;
@@ -189,11 +203,33 @@ const ConfirmDialog = ({ isOpen, onClose, onConfirm, title, message }) => {
   );
 };
 
-// --- COMPONENT AVATAR (ĐÃ FIX CỠ CHỮ VÀ THÊM SIZE) ---
-const Avatar = ({ name, size = "md", className = "" }) => {
-  const isMe = name === "Tôi";
+// --- COMPONENT AVATAR (ĐÃ NÂNG CẤP: HỖ TRỢ TỰ ĐỘNG HIỂN THỊ ẢNH THẬT) ---
+const Avatar = ({ name, src, size = "md", className = "" }) => {
+  // Định nghĩa kích thước và cỡ chữ
+  const sizeClasses = {
+    xs: "w-6 h-6 text-[9px]",
+    sm: "w-8 h-8 text-[10px]",
+    md: "w-10 h-10 text-[12px]",
+    lg: "w-16 h-16 text-xl",
+    xl: "w-24 h-24 text-3xl",
+  };
+  const currentSizeClass = sizeClasses[size] || sizeClasses.md;
 
-  // Lấy 2 chữ cái đầu (VD: Xuân Sơn -> XS)
+  // 1. NẾU CÓ LINK ẢNH (SRC) -> HIỂN THỊ ẢNH THẬT
+  if (src) {
+    // Tự động trích xuất width và height từ sizeClasses để áp vào ảnh
+    const dimensions = currentSizeClass.split(" ").slice(0, 2).join(" ");
+    return (
+      <img
+        src={src}
+        alt={name}
+        className={`${dimensions} rounded-full object-cover shadow-sm border border-gray-100 shrink-0 ${className}`}
+      />
+    );
+  }
+
+  // 2. NẾU KHÔNG CÓ ẢNH -> HIỂN THỊ CHỮ CÁI ĐẦU NHƯ CŨ
+  const isMe = name === "Tôi";
   const initials = isMe
     ? "ME"
     : name
@@ -214,21 +250,8 @@ const Avatar = ({ name, size = "md", className = "" }) => {
     "bg-pink-500",
     "bg-cyan-500",
   ];
-
   const colorIndex = name ? name.length % colors.length : 0;
   const bgColor = isMe ? "bg-slate-800" : colors[colorIndex];
-
-  // Định nghĩa kích thước và cỡ chữ tương ứng
-  const sizeClasses = {
-    xs: "w-6 h-6 text-[9px]", // <--- THÊM MỚI: Siêu nhỏ (cho list chọn người)
-    sm: "w-8 h-8 text-[10px]", // Nhỏ
-    md: "w-10 h-10 text-[12px]", // Vừa (giảm font một chút cho đẹp)
-    lg: "w-16 h-16 text-xl", // Lớn
-    xl: "w-24 h-24 text-3xl", // <--- THÊM MỚI: Siêu lớn (cho Profile)
-  };
-
-  // Fallback nếu truyền size lạ thì về md
-  const currentSizeClass = sizeClasses[size] || sizeClasses.md;
 
   return (
     <div
@@ -1107,7 +1130,15 @@ const ExpenseModal = ({
                       } ${isSelected ? "bg-yellow-50" : ""}`}
                     >
                       <div className="flex items-center gap-3">
-                        <Avatar name={p.name} size="md" />
+                        {p.photoURL ? (
+                          <img
+                            src={p.photoURL}
+                            alt={p.name}
+                            className="w-10 h-10 rounded-full object-cover shadow-sm border border-gray-100 shrink-0"
+                          />
+                        ) : (
+                          <Avatar name={p.name} size="md" src={p.photoURL} />
+                        )}
                         <span className="font-bold text-gray-800">
                           {p.name}
                         </span>
@@ -1445,14 +1476,56 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
 
     setUploading(true);
     try {
+      // 1. Tải ảnh lên Storage
       const storageRef = ref(storage, `profile_pictures/${user.uid}`);
       await uploadBytes(storageRef, file);
       const url = await getDownloadURL(storageRef);
+
+      // 2. Cập nhật vào hệ thống Auth
       await updateProfile(user, { photoURL: url });
-      showToast("Đã cập nhật ảnh đại diện!", "success");
+
+      // ==========================================
+      // 3. [CODE MỚI] LƯU ẢNH VÀO FIRESTORE ĐỂ BẠN BÈ THẤY
+      // ==========================================
+      const userRef = doc(db, "users", user.uid);
+      await setDoc(userRef, { photoURL: url }, { merge: true });
+
+      // ==========================================
+      // 4. [CODE MỚI] ĐỔI ẢNH HÀNG LOẠT TRONG CÁC NHÓM ĐANG THAM GIA
+      // ==========================================
+      const userDoc = await getDoc(userRef);
+      if (userDoc.exists()) {
+        const joinedGroups = userDoc.data().joinedGroups || [];
+
+        // Quét qua tất cả các nhóm mình có mặt
+        for (const g of joinedGroups) {
+          const groupRef = doc(db, "groups", g.id);
+          const groupSnap = await getDoc(groupRef);
+
+          if (groupSnap.exists()) {
+            const gData = groupSnap.data();
+            let updatedMembers = gData.members || [];
+
+            // Tìm tên mình trong nhóm và cập nhật lại link ảnh mới
+            updatedMembers = updatedMembers.map((m) =>
+              m.id === user.uid ? { ...m, photoURL: url } : m,
+            );
+
+            // Lưu lại vào nhóm
+            await updateDoc(groupRef, { members: updatedMembers });
+          }
+        }
+      }
+
+      showToast("Đã cập nhật ảnh đại diện thành công!", "success");
+
+      // [QUAN TRỌNG]: Tự động tải lại trang để Firebase Auth làm mới dữ liệu ảnh toàn App
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
     } catch (error) {
       console.error(error);
-      showToast("Lỗi cập nhật ảnh", "error");
+      showToast("Lỗi cập nhật ảnh: " + error.message, "error");
     } finally {
       setUploading(false);
     }
@@ -1966,6 +2039,7 @@ export default function App() {
   const [itemToDelete, setItemToDelete] = useState(null);
   const [viewingImage, setViewingImage] = useState(null);
   const [contacts, setContacts] = useState([]);
+  const [friendRequests, setFriendRequests] = useState([]);
   const [user, setUser] = useState(null);
   const [globalFriendStats, setGlobalFriendStats] = useState([]);
   const [groupOwnerId, setGroupOwnerId] = useState(null);
@@ -2000,6 +2074,140 @@ export default function App() {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  // --- AUTO-FIX BUG "me": CHUYỂN ĐỔI CHỮ "me" THÀNH UID CỦA CHỦ NHÓM ---
+  useEffect(() => {
+    if (!groupId || !expenses.length || !groupOwnerId) return;
+
+    let needsUpdate = false;
+    const fixedExpenses = expenses.map((exp) => {
+      let newExp = { ...exp };
+      let modified = false;
+
+      // 1. Chuyển người trả tiền ("me") thành UID của trưởng nhóm
+      if (newExp.payerId === "me") {
+        newExp.payerId = groupOwnerId;
+        modified = true;
+      }
+
+      // 2. Chuyển "me" trong danh sách người tham gia
+      if (newExp.sharedWith?.includes("me")) {
+        newExp.sharedWith = [
+          ...new Set(
+            newExp.sharedWith.map((id) => (id === "me" ? groupOwnerId : id)),
+          ),
+        ];
+        modified = true;
+      }
+
+      // 3. Chuyển "me" trong danh sách người đã trả nợ
+      if (newExp.settledBy?.includes("me")) {
+        newExp.settledBy = [
+          ...new Set(
+            newExp.settledBy.map((id) => (id === "me" ? groupOwnerId : id)),
+          ),
+        ];
+        modified = true;
+      }
+
+      // 4. Chuyển "me" trong chia tiền chi tiết (Custom Shares)
+      if (newExp.customShares && newExp.customShares["me"] !== undefined) {
+        newExp.customShares[groupOwnerId] = newExp.customShares["me"];
+        delete newExp.customShares["me"];
+        modified = true;
+      }
+
+      if (modified) needsUpdate = true;
+      return newExp;
+    });
+
+    // Cập nhật lại toàn bộ lên Firebase
+    if (needsUpdate) {
+      updateDoc(doc(db, "groups", groupId), { expenses: fixedExpenses })
+        .then(() =>
+          showToast("Đã tự động sửa lỗi hiển thị sai công nợ!", "success"),
+        )
+        .catch((e) => console.error("Lỗi fix data:", e));
+    }
+  }, [expenses, groupId, groupOwnerId]);
+
+  // --- AUTO-MERGE: TỰ ĐỘNG GỘP THÀNH VIÊN TRÙNG LẶP TRONG NHÓM ---
+  useEffect(() => {
+    // Chỉ chạy khi đang ở trong nhóm và có dữ liệu
+    if (!groupId || !people || people.length === 0) return;
+
+    const emailMap = {};
+    let needsUpdate = false;
+    let newPeople = [...people];
+    let newExpenses = [...expenses];
+
+    people.forEach((p) => {
+      if (!p.email) return; // Nếu không có email thì bỏ qua
+
+      if (!emailMap[p.email]) {
+        emailMap[p.email] = p;
+      } else {
+        // PHÁT HIỆN TRÙNG EMAIL TRONG CÙNG 1 NHÓM!
+        needsUpdate = true;
+        const existing = emailMap[p.email];
+
+        // Xác định ai là tài khoản "Thật" (ưu tiên có Avatar hoặc ID dài hơn)
+        let realId, fakeId;
+        if (p.photoURL || p.id.length > existing.id.length) {
+          realId = p.id;
+          fakeId = existing.id;
+          emailMap[p.email] = p; // Cập nhật người "thật" vào danh sách chuẩn
+        } else {
+          realId = existing.id;
+          fakeId = p.id;
+        }
+
+        // 1. Gạch tên tài khoản ảo khỏi danh sách thành viên nhóm
+        newPeople = newPeople.filter((m) => m.id !== fakeId);
+
+        // 2. Chuyển toàn bộ tiền nợ, lịch sử chi tiêu từ ID ảo sang ID thật
+        newExpenses = newExpenses.map((exp) => {
+          let newExp = { ...exp };
+          if (newExp.payerId === fakeId) newExp.payerId = realId; // Đổi người trả
+
+          if (newExp.sharedWith?.includes(fakeId)) {
+            newExp.sharedWith = [
+              ...new Set(
+                newExp.sharedWith.map((id) => (id === fakeId ? realId : id)),
+              ),
+            ];
+          }
+          if (newExp.settledBy?.includes(fakeId)) {
+            newExp.settledBy = [
+              ...new Set(
+                newExp.settledBy.map((id) => (id === fakeId ? realId : id)),
+              ),
+            ];
+          }
+          if (
+            newExp.customShares &&
+            newExp.customShares[fakeId] !== undefined
+          ) {
+            newExp.customShares[realId] = newExp.customShares[fakeId];
+            delete newExp.customShares[fakeId];
+          }
+          return newExp;
+        });
+      }
+    });
+
+    // Nếu có gộp, lưu ngay lên Firebase
+    if (needsUpdate) {
+      updateDoc(doc(db, "groups", groupId), {
+        members: newPeople,
+        expenses: newExpenses,
+      })
+        .then(() => {
+          showToast("Hệ thống đã tự động gộp 2 tài khoản Thu Hà!", "success");
+        })
+        .catch((e) => console.error("Lỗi gộp:", e));
+    }
+  }, [people, expenses, groupId]);
 
   // --- THAY THẾ: LOGIC ĐỒNG BỘ REAL-TIME VỚI FIREBASE ---
   // Xóa hoặc comment lại các hàm fetchDataFromServer / saveDataToServer cũ
@@ -2230,14 +2438,35 @@ export default function App() {
         // Lưu token này lên server nếu muốn nhận thông báo từ xa
       });
 
-      PushNotifications.addListener("registrationError", (error) => {
-        console.log("Error on registration: " + JSON.stringify(error));
+      // Tìm đoạn listener "registration" và sửa lại thế này:
+      PushNotifications.addListener("registration", async (token) => {
+        console.log("Push token:", token.value);
+        if (auth.currentUser) {
+          // 1. Lưu vào Firestore (như cũ)
+          await setDoc(
+            doc(db, "users", auth.currentUser.uid),
+            {
+              fcmToken: token.value,
+            },
+            { merge: true },
+          );
+
+          // 2. [QUAN TRỌNG]: Gửi lên Cloudflare Worker KV để Server biết đường mà gửi
+          const currentDataRaw = await fetch(
+            `${API_URL}?uid=${auth.currentUser.uid}`,
+          ).then((r) => r.json());
+          await fetch(`${API_URL}?uid=${auth.currentUser.uid}`, {
+            method: "POST",
+            body: JSON.stringify({ ...currentDataRaw, fcmToken: token.value }),
+          });
+        }
       });
 
       PushNotifications.addListener(
         "pushNotificationReceived",
         (notification) => {
-          showToast(`Buzz: ${notification.title}`, "buzz");
+          playBuzzSound(); // <--- GỌI ÂM THANH Ở ĐÂY (MÁY NGƯỜI NHẬN SẼ KÊU)
+          showToast(`Buzz: ${notification.title || "Bạn bị đòi nợ!"}`, "buzz");
         },
       );
     }
@@ -2351,9 +2580,14 @@ export default function App() {
         }
       }
 
-      // 3. SẮP XẾP LỊCH SỬ MỚI NHẤT LÊN ĐẦU
-      allExpenses.sort((a, b) => new Date(b.date) - new Date(a.date));
-      setGlobalHistory(allExpenses);
+      // 3. LỌC VÀ SẮP XẾP LỊCH SỬ (CHỈ LẤY GIAO DỊCH CÓ MẶT TÔI)
+      const myRelatedExpenses = allExpenses.filter(
+        (e) =>
+          e.payerId === user.uid ||
+          (e.sharedWith && e.sharedWith.includes(user.uid)),
+      );
+      myRelatedExpenses.sort((a, b) => new Date(b.date) - new Date(a.date));
+      setGlobalHistory(myRelatedExpenses);
 
       // 4. Update Stats
       const statsArray = Object.values(friendMap).sort(
@@ -2374,7 +2608,6 @@ export default function App() {
 
   // --- AUTH + SYNC ---
   useEffect(() => {
-    // [FIX MOBILE] Tạo bộ đếm 4 giây: Nếu mạng lag hoặc Firebase chưa trả về, tự tắt loading để vào App
     const safetyTimer = setTimeout(() => {
       setAuthLoading((prev) => {
         if (prev) {
@@ -2385,11 +2618,27 @@ export default function App() {
       });
     }, 4000);
 
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      clearTimeout(safetyTimer); // Nếu Firebase phản hồi thì xóa timer đi
+    // [SỬA]: Thêm async vào đây
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      clearTimeout(safetyTimer);
       setUser(currentUser);
       setAuthLoading(false);
       if (currentUser) {
+        // [QUAN TRỌNG NHẤT]: Lưu thông tin user lên Firestore để hệ thống nhận diện được email và avatar
+        try {
+          await setDoc(
+            doc(db, "users", currentUser.uid),
+            {
+              email: currentUser.email,
+              displayName: currentUser.displayName || "",
+              photoURL: currentUser.photoURL || "", // Lưu avatar
+            },
+            { merge: true },
+          );
+        } catch (error) {
+          console.error("Lỗi lưu thông tin user lên DB: ", error);
+        }
+
         fetchDataFromServer(currentUser.uid);
       }
     });
@@ -2507,14 +2756,16 @@ export default function App() {
   useEffect(() => {
     if (!user) {
       setMyGroups([]);
-      setContacts([]); // Reset khi logout
+      setContacts([]);
+      setFriendRequests([]); // Reset
       return;
     }
     const unsub = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
       if (docSnap.exists()) {
         const userData = docSnap.data();
         setMyGroups(userData.joinedGroups || []);
-        setContacts(userData.contacts || []); // <--- LẤY DANH BẠ VỀ
+        setContacts(userData.contacts || []);
+        setFriendRequests(userData.friendRequests || []); // <--- THÊM DÒNG NÀY
       }
     });
     return () => unsub();
@@ -2814,11 +3065,38 @@ export default function App() {
     }
   };
 
+  // --- HÀM ĐĂNG XUẤT (ĐÃ FIX: DỌN SẠCH DỮ LIỆU THÀNH BẢNG TRẮNG) ---
   const handleLogout = async () => {
-    await signOut(auth);
-    setUser(null);
-    setIsProfileOpen(false);
-    showToast("Đã đăng xuất.", "info");
+    try {
+      // 1. Đăng xuất khỏi Firebase
+      await signOut(auth);
+
+      // 2. Xóa dữ liệu user và đóng modal
+      setUser(null);
+      setIsProfileOpen(false);
+
+      // 3. Đưa tất cả các state hiển thị trên màn hình về số 0 / mảng rỗng
+      setPeople([]);
+      setExpenses([]);
+      setGroupId("");
+      setIsGroupMode(false);
+      setMyGroups([]);
+      setContacts([]);
+      setGlobalHistory([]);
+      setGlobalFriendStats([]);
+      setGlobalStats({ netWorth: 0, totalOwed: 0, totalDebt: 0 });
+      setActiveTab("dashboard");
+
+      // 4. Quét sạch bộ nhớ đệm (Local Storage) lưu trên máy
+      localStorage.removeItem("sm_people");
+      localStorage.removeItem("sm_expenses");
+      localStorage.removeItem("sm_group_id");
+
+      showToast("Đã đăng xuất an toàn và xóa dữ liệu cục bộ.", "info");
+    } catch (error) {
+      console.error("Lỗi đăng xuất:", error);
+      showToast("Lỗi khi đăng xuất!", "error");
+    }
   };
 
   const showToast = (message, type = "error") => {
@@ -2828,20 +3106,19 @@ export default function App() {
 
   // --- LOGIC TÍNH TOÁN CÔNG NỢ (ĐÃ CẬP NHẬT SETTLEMENT) ---
   const calculateNetDebt = (personId) => {
-    let balance = 0;
+    if (!user) return 0;
+    let balance = 0; // Dương = Họ nợ mình, Âm = Mình nợ họ
+
     expenses.forEach((exp) => {
       const amount = parseFloat(exp.amount);
       const payerId = exp.payerId || "me";
-      const settledBy = exp.settledBy || []; // Danh sách người đã trả tiền
+      const settledBy = exp.settledBy || [];
 
-      // Hàm helper để tính share của một người bất kỳ trong bill này
       const getShareOf = (uid) => {
         if (exp.type === "custom") {
           return parseFloat(exp.customShares?.[uid] || 0);
         } else {
-          let count = exp.sharedWith.length; // <--- BẠN ĐANG CÓ DÒNG NÀY
-
-          // --- HÃY DÁN ĐOẠN FIX VÀO NGAY SAU DÒNG TRÊN ---
+          let count = exp.sharedWith.length;
           if (exp.type === "full") {
             const realPayerId = exp.payerId === "me" ? user?.uid : exp.payerId;
             const validDebtors = exp.sharedWith.filter((id) => {
@@ -2851,34 +3128,26 @@ export default function App() {
             count = validDebtors.length;
           }
           if (count === 0) return 0;
-          // ------------------------------------------------
-
           return amount / count;
         }
       };
 
-      // TRƯỜNG HỢP 1: personId là NGƯỜI TRẢ TIỀN (Chủ nợ)
-      if (payerId === personId) {
-        // Họ đã chi tiền. Ta cần tính xem "Xã hội" còn nợ họ bao nhiêu.
-        // Chỉ cộng dồn những khoản của người CHƯA TRẢ (chưa nằm trong settledBy).
-
-        let totalOwedToPayer = 0;
-        exp.sharedWith.forEach((debtorId) => {
-          if (debtorId === personId) return; // Bỏ qua chính họ
-
-          // Nếu người nợ này CHƯA có trong danh sách đã trả -> Cộng vào khoản phải thu
-          if (!settledBy.includes(debtorId)) {
-            totalOwedToPayer += getShareOf(debtorId);
-          }
-        });
-
-        // balance âm biểu thị "Được nợ"
-        balance -= totalOwedToPayer;
-      } else if (exp.sharedWith.includes(personId)) {
-        // TRƯỜNG HỢP 2: personId là NGƯỜI TIÊU (Con nợ)
-        // Nếu họ CHƯA TRẢ (không có trong settledBy) -> Cộng nợ
-        if (!settledBy.includes(personId)) {
+      // CHỈ TÍNH TOÁN NẾU GIAO DỊCH NÀY TRỰC TIẾP GIỮA TÔI VÀ PERSON_ID
+      if (payerId === user.uid) {
+        // TÔI trả tiền -> Kiểm tra xem PersonId có nợ tôi không
+        if (
+          exp.sharedWith.includes(personId) &&
+          !settledBy.includes(personId)
+        ) {
           balance += getShareOf(personId);
+        }
+      } else if (payerId === personId) {
+        // PERSON_ID trả tiền -> Kiểm tra xem Tôi có nợ họ không
+        if (
+          exp.sharedWith.includes(user.uid) &&
+          !settledBy.includes(user.uid)
+        ) {
+          balance -= getShareOf(user.uid);
         }
       }
     });
@@ -2978,32 +3247,233 @@ export default function App() {
 
   const [editingContact, setEditingContact] = useState(null);
 
-  // --- 1. SỬA HÀM THÊM LIÊN HỆ (CHO PHÉP EMAIL RỖNG) ---
-  const addToContacts = async () => {
-    if (!newPersonName.trim()) return showToast("Vui lòng nhập tên!", "error");
-    // Không check email nữa, cho phép rỗng
+  // --- 1. GỬI LỜI MỜI KẾT BẠN ---
+  const sendFriendRequest = async () => {
+    const emailToSearch = newPersonEmail.trim();
+    if (!emailToSearch)
+      return showToast("Vui lòng nhập Email để tìm kiếm!", "error");
+    if (emailToSearch === user.email)
+      return showToast("Không thể tự kết bạn với chính mình!", "error");
 
     try {
-      const newContact = {
-        id: uuidv4(),
-        name: newPersonName,
-        email: newPersonEmail.trim() || "", // Nếu không nhập thì là chuỗi rỗng
-        createdAt: new Date().toISOString(),
+      // Tìm user trên hệ thống
+      const usersRef = collection(db, "users");
+      const q = query(usersRef, where("email", "==", emailToSearch));
+      const snap = await getDocs(q);
+
+      if (snap.empty) {
+        return showToast(
+          "Không tìm thấy tài khoản nào với Email này!",
+          "error",
+        );
+      }
+
+      const targetUid = snap.docs[0].id;
+
+      // Kiểm tra xem đã là bạn bè chưa
+      if (contacts.some((c) => c.id === targetUid)) {
+        return showToast("Hai bạn đã là bạn bè rồi!", "info");
+      }
+
+      // Đẩy lời mời vào hộp thư của người kia
+      const requestData = {
+        id: user.uid,
+        name: user.displayName || user.email.split("@")[0],
+        email: user.email,
+        photoURL: user.photoURL || "",
+        timestamp: new Date().toISOString(),
       };
 
-      await updateDoc(doc(db, "users", user.uid), {
-        contacts: arrayUnion(newContact),
+      await updateDoc(doc(db, "users", targetUid), {
+        friendRequests: arrayUnion(requestData),
       });
 
-      setNewPersonName("");
-      setNewPersonEmail("");
-      showToast("Đã thêm vào danh bạ!", "success");
+      showToast("Đã gửi lời mời kết bạn!", "success");
+      setNewPersonEmail(""); // Xóa ô nhập
     } catch (e) {
       console.error(e);
-      showToast("Lỗi thêm danh bạ: " + e.message, "error");
+      showToast("Lỗi gửi lời mời: " + e.message, "error");
     }
   };
 
+  // --- 2. CHẤP NHẬN LỜI MỜI (ĐỒNG BỘ TOÀN DIỆN DANH BẠ & NHÓM CŨ) ---
+  const handleAcceptRequest = async (requester) => {
+    if (!user) return;
+    try {
+      // A. Xóa khỏi danh sách chờ
+      const updatedRequests = friendRequests.filter(
+        (req) => req.id !== requester.id,
+      );
+
+      // B. XỬ LÝ DANH BẠ CỦA MÌNH (GỘP NẾU TRÙNG EMAIL)
+      let myUpdatedContacts = [...contacts];
+      const existingIndex = myUpdatedContacts.findIndex(
+        (c) => c.email === requester.email,
+      );
+      let oldFakeId = null;
+
+      const newContactForMe = {
+        id: requester.id, // ID thật của Firebase
+        name: requester.name,
+        email: requester.email,
+        photoURL: requester.photoURL || "",
+        createdAt: new Date().toISOString(),
+      };
+
+      if (existingIndex >= 0) {
+        oldFakeId = myUpdatedContacts[existingIndex].id; // Lưu lại ID ảo cũ để đi tìm trong các nhóm
+        myUpdatedContacts[existingIndex] = {
+          ...myUpdatedContacts[existingIndex],
+          ...newContactForMe,
+        };
+      } else {
+        myUpdatedContacts.push(newContactForMe);
+      }
+
+      await updateDoc(doc(db, "users", user.uid), {
+        friendRequests: updatedRequests,
+        contacts: myUpdatedContacts,
+      });
+
+      // C. XỬ LÝ DANH BẠ CỦA NGƯỜI KIA
+      const requesterRef = doc(db, "users", requester.id);
+      const requesterSnap = await getDoc(requesterRef);
+
+      if (requesterSnap.exists()) {
+        let requesterContacts = requesterSnap.data().contacts || [];
+        const meIndexInTheirs = requesterContacts.findIndex(
+          (c) => c.email === user.email,
+        );
+
+        const myInfoForThem = {
+          id: user.uid,
+          name: user.displayName || user.email.split("@")[0],
+          email: user.email,
+          photoURL: user.photoURL || "",
+          createdAt: new Date().toISOString(),
+        };
+
+        if (meIndexInTheirs >= 0) {
+          requesterContacts[meIndexInTheirs] = {
+            ...requesterContacts[meIndexInTheirs],
+            ...myInfoForThem,
+          };
+        } else {
+          requesterContacts.push(myInfoForThem);
+        }
+
+        await updateDoc(requesterRef, { contacts: requesterContacts });
+      }
+
+      // ==========================================
+      // D. NÂNG CẤP: ĐỒNG BỘ ID VÀO CÁC NHÓM CŨ ĐÃ THAM GIA
+      // ==========================================
+      // Nếu phát hiện ra có ID ảo cũ (nhập tay) và ID này khác với ID thật
+      if (oldFakeId && oldFakeId !== requester.id) {
+        // Duyệt qua tất cả các nhóm của bạn
+        for (const g of myGroups) {
+          const groupRef = doc(db, "groups", g.id);
+          const groupSnap = await getDoc(groupRef);
+
+          if (groupSnap.exists()) {
+            const groupData = groupSnap.data();
+            let members = groupData.members || [];
+            let expenses = groupData.expenses || [];
+
+            // Kiểm tra xem nhóm này có Thu Hà (ảo) không?
+            const memberIndex = members.findIndex((m) => m.id === oldFakeId);
+
+            if (memberIndex >= 0) {
+              // 1. Cập nhật thành viên: Thay ID ảo bằng ID thật, cập nhật Avatar
+              members[memberIndex] = {
+                ...members[memberIndex],
+                id: requester.id,
+                photoURL: requester.photoURL || "",
+                name: requester.name, // Lấy tên thật của họ
+              };
+
+              // 2. Cập nhật Lịch sử giao dịch: Tìm tất cả chỗ nào có ID ảo -> Đổi thành ID thật
+              const updatedExpenses = expenses.map((exp) => {
+                let newExp = { ...exp };
+
+                // Đổi người trả tiền
+                if (newExp.payerId === oldFakeId) newExp.payerId = requester.id;
+
+                // Đổi người tham gia (chia tiền)
+                if (
+                  newExp.sharedWith &&
+                  newExp.sharedWith.includes(oldFakeId)
+                ) {
+                  newExp.sharedWith = newExp.sharedWith.map((id) =>
+                    id === oldFakeId ? requester.id : id,
+                  );
+                }
+
+                // Đổi người đã xác nhận trả (settled)
+                if (newExp.settledBy && newExp.settledBy.includes(oldFakeId)) {
+                  newExp.settledBy = newExp.settledBy.map((id) =>
+                    id === oldFakeId ? requester.id : id,
+                  );
+                }
+
+                // Đổi Object chia tiền chi tiết (customShares)
+                if (
+                  newExp.customShares &&
+                  newExp.customShares[oldFakeId] !== undefined
+                ) {
+                  newExp.customShares[requester.id] =
+                    newExp.customShares[oldFakeId];
+                  delete newExp.customShares[oldFakeId];
+                }
+
+                return newExp;
+              });
+
+              // 3. Lưu toàn bộ dữ liệu Nhóm mới lên Firebase
+              await updateDoc(groupRef, {
+                members: members,
+                expenses: updatedExpenses,
+              });
+
+              // 4. BẮN NHÓM NÀY SANG CHO NGƯỜI KIA (Để họ thấy nhóm cũ ngay lập tức)
+              const groupInfoForFriend = {
+                id: g.id,
+                name: groupData.name || "Nhóm",
+                icon: groupData.icon || "💰",
+              };
+
+              await updateDoc(doc(db, "users", requester.id), {
+                joinedGroups: arrayUnion(groupInfoForFriend),
+              });
+            }
+          }
+        }
+      }
+
+      showToast("Đã đồng bộ toàn bộ bạn bè và nhóm thành công!", "success");
+    } catch (e) {
+      console.error("Lỗi đồng bộ:", e);
+      showToast("Lỗi: " + e.message, "error");
+    }
+  };
+
+  // --- 3. TỪ CHỐI LỜI MỜI ---
+  const handleDeclineRequest = async (requesterId) => {
+    if (!user) return;
+    try {
+      const updatedRequests = friendRequests.filter(
+        (req) => req.id !== requesterId,
+      );
+      await updateDoc(doc(db, "users", user.uid), {
+        friendRequests: updatedRequests,
+      });
+      showToast("Đã từ chối lời mời", "info");
+    } catch (e) {
+      showToast("Lỗi: " + e.message, "error");
+    }
+  };
+
+  // --- 2. HÀM CẬP NHẬT LIÊN HỆ (SỬA TÊN/EMAIL) ---
   // --- 2. HÀM CẬP NHẬT LIÊN HỆ (SỬA TÊN/EMAIL) ---
   const handleUpdateContact = async (updatedName, updatedEmail) => {
     if (!editingContact || !user) return;
@@ -3011,27 +3481,59 @@ export default function App() {
       return showToast("Tên không được để trống", "error");
 
     try {
-      // Vì Firestore không hỗ trợ update 1 phần tử trong mảng, ta phải lấy cả mảng về, sửa, rồi lưu lại.
       const updatedList = contacts.map((c) =>
         c.id === editingContact.id
           ? { ...c, name: updatedName, email: updatedEmail.trim() }
           : c,
       );
 
-      // Cập nhật lên Server
-      await updateDoc(doc(db, "users", user.uid), {
-        contacts: updatedList,
-      });
+      // [SỬA LỖI]: Dùng setDoc với { merge: true } thay vì updateDoc
+      await setDoc(
+        doc(db, "users", user.uid),
+        {
+          contacts: updatedList,
+        },
+        { merge: true },
+      );
 
-      // Cập nhật UI (Optimistic update)
       setContacts(updatedList);
-
-      setEditingContact(null); // Đóng modal
+      setEditingContact(null);
       showToast("Đã cập nhật thông tin!", "success");
     } catch (e) {
       console.error(e);
       showToast("Lỗi cập nhật: " + e.message, "error");
     }
+  };
+
+  // --- 3. HÀM XÓA LIÊN HỆ (MỚI) ---
+  const handleDeleteContact = (contactId) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "Xóa khỏi danh bạ?",
+      message: "Bạn có chắc chắn muốn xóa người này khỏi danh bạ chung không?",
+      onConfirm: async () => {
+        if (!user) return;
+        try {
+          const updatedList = contacts.filter((c) => c.id !== contactId);
+
+          await setDoc(
+            doc(db, "users", user.uid),
+            {
+              contacts: updatedList,
+            },
+            { merge: true },
+          );
+
+          setContacts(updatedList);
+          showToast("Đã xóa liên hệ!", "success");
+          setConfirmDialog({ isOpen: false });
+        } catch (e) {
+          console.error(e);
+          showToast("Lỗi khi xóa: " + e.message, "error");
+          setConfirmDialog({ isOpen: false });
+        }
+      },
+    });
   };
 
   // --- HÀM: XÁC NHẬN THANH TOÁN (BẢN FIX LỖI) ---
@@ -3255,21 +3757,39 @@ export default function App() {
   };
 
   // --- LOGIC BUZZ (GIỤC NỢ) ---
-  const handleBuzz = (person) => {
-    if (!person.email) {
-      showToast(
-        `Chưa gán Email cho ${person.name}! Sửa thông tin để thêm.`,
-        "error",
-      );
+  const handleBuzz = async (person) => {
+    if (!person.id) {
+      showToast(`Lỗi: Không tìm thấy ID của ${person.name}!`, "error");
       return;
     }
 
-    // LOGIC GỬI NOTIFICATION:
-    // Đây là nơi bạn gọi API lên Server của bạn để bắn FCM Push Notification
-    // Ví dụ: fetch(`${API_URL}/buzz`, { method: 'POST', body: JSON.stringify({ to: person.email }) })
+    // 1. Phát âm thanh ở máy mình trước cho vui tai
+    playBuzzSound();
+    showToast(`Đã BUZZ tới ${person.name}!`, "buzz");
 
-    // Hiện tại giả lập thành công:
-    showToast(`Đã BUZZ tới ${person.email}!`, "buzz");
+    // 2. Gọi API lên Backend của bạn để nhờ Backend bắn thông báo FCM
+    try {
+      const response = await fetch(`${API_URL}/buzz`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          targetUserId: person.id, // Gửi ID của người nợ lên Backend
+          senderName: user.displayName || user.email.split("@")[0], // Tên của bạn
+          title: "Bíp bíp! Đòi nợ!!! 💸",
+          body: `${
+            user.displayName || "Ai đó"
+          } đang gọi bạn vào thanh toán kìa!`,
+        }),
+      });
+
+      if (!response.ok) {
+        console.error("Backend phản hồi lỗi:", await response.text());
+      }
+    } catch (error) {
+      console.error("Lỗi khi gọi API Buzz:", error);
+    }
   };
 
   const openAddModal = () => {
@@ -3281,15 +3801,36 @@ export default function App() {
     setIsModalOpen(true);
   };
 
-  // Thay thế hàm handleSaveExpense cũ bằng hàm này:
+  // --- HÀM LƯU GIAO DỊCH (ĐÃ FIX LỖI "me") ---
   const handleSaveExpense = async (expenseData) => {
-    // Xác định đang thao tác ở nhóm nào
-    // 1. Nếu đang sửa (editingExpense) -> Lấy groupId của chính expense đó
-    // 2. Nếu không -> Lấy groupId hiện tại của App
     const targetGroupId = editingExpense?.groupId || groupId;
-
     if (!targetGroupId)
       return showToast("Lỗi: Không xác định được nhóm.", "error");
+
+    // [BƯỚC QUAN TRỌNG]: Dịch tất cả chữ "me" thành UID thật của máy đang dùng trước khi lưu
+    const realUid = user.uid;
+    let cleanData = { ...expenseData };
+
+    if (cleanData.payerId === "me") cleanData.payerId = realUid;
+
+    if (cleanData.sharedWith) {
+      cleanData.sharedWith = [
+        ...new Set(
+          cleanData.sharedWith.map((id) => (id === "me" ? realUid : id)),
+        ),
+      ];
+    }
+    if (cleanData.customShares && cleanData.customShares["me"] !== undefined) {
+      cleanData.customShares[realUid] = cleanData.customShares["me"];
+      delete cleanData.customShares["me"];
+    }
+    if (cleanData.settledBy) {
+      cleanData.settledBy = [
+        ...new Set(
+          cleanData.settledBy.map((id) => (id === "me" ? realUid : id)),
+        ),
+      ];
+    }
 
     try {
       const groupRef = doc(db, "groups", targetGroupId);
@@ -3300,22 +3841,19 @@ export default function App() {
         let updatedExpenses = data.expenses || [];
 
         if (editingExpense) {
-          // --- LOGIC SỬA ---
           updatedExpenses = updatedExpenses.map((e) =>
             e.id === editingExpense.id
               ? {
-                  ...expenseData,
+                  ...cleanData,
                   id: editingExpense.id,
-                  // Giữ lại các trường quan trọng cũ
                   comments: e.comments || [],
                   billImage: e.billImage || null,
                 }
               : e,
           );
         } else {
-          // --- LOGIC THÊM MỚI ---
           updatedExpenses.push({
-            ...expenseData,
+            ...cleanData,
             id: uuidv4(),
             comments: [],
             billImage: null,
@@ -3644,8 +4182,14 @@ export default function App() {
       <HistoryModal
         isOpen={isHistoryModalOpen}
         onClose={() => setIsHistoryModalOpen(false)}
-        // LOGIC MỚI: Nếu có groupId (trong nhóm) -> Lấy expenses. Nếu không (trang chủ) -> Lấy globalHistory
-        expenses={groupId ? expenses : globalHistory}
+        expenses={
+          groupId
+            ? expenses.filter(
+                (e) =>
+                  e.payerId === user?.uid || e.sharedWith.includes(user?.uid),
+              )
+            : globalHistory
+        }
         people={people}
         renderHistoryItem={(exp) => renderHistoryItem(exp)}
       />
@@ -4253,38 +4797,76 @@ export default function App() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                      {/* Form thêm bạn nhanh */}
+                      {/* Form tìm & gửi lời mời */}
                       <div className="bg-blue-50 p-4 rounded-2xl mb-4 border border-blue-100">
                         <p className="text-xs font-bold text-blue-800 mb-2 uppercase">
-                          Thêm liên hệ mới
+                          Kết bạn mới
                         </p>
-
-                        {/* --- SỬA DÒNG NÀY --- */}
-                        <div className="flex flex-col gap-3 mb-3">
-                          {" "}
-                          {/* Đổi thành flex-col để xếp dọc */}
-                          <input
-                            value={newPersonName}
-                            onChange={(e) => setNewPersonName(e.target.value)}
-                            placeholder="Tên (VD: GDragon)"
-                            className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none" // Tăng padding lên p-3 cho dễ bấm
-                          />
+                        <div className="flex gap-2">
                           <input
                             value={newPersonEmail}
                             onChange={(e) => setNewPersonEmail(e.target.value)}
-                            placeholder="Email (để Buzz)..."
-                            className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none"
+                            placeholder="Nhập email bạn bè..."
+                            className="flex-1 p-3 rounded-xl border border-blue-200 text-sm outline-none focus:ring-2 ring-blue-100"
                           />
+                          <button
+                            onClick={sendFriendRequest}
+                            className="px-4 py-3 bg-blue-600 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-transform shrink-0"
+                          >
+                            Gửi lời mời
+                          </button>
                         </div>
-                        {/* ------------------- */}
-
-                        <button
-                          onClick={addToContacts}
-                          className="w-full py-3 bg-blue-600 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-transform"
-                        >
-                          + Thêm vào danh bạ
-                        </button>
                       </div>
+
+                      {/* KHU VỰC HIỂN THỊ LỜI MỜI KẾT BẠN */}
+                      {friendRequests?.length > 0 && (
+                        <div className="mb-6">
+                          <p className="text-xs font-bold text-orange-600 uppercase mb-3 flex items-center gap-2">
+                            <Bell size={16} className="animate-bounce" /> Lời
+                            mời kết bạn ({friendRequests.length})
+                          </p>
+                          <div className="space-y-3">
+                            {friendRequests.map((req) => (
+                              <div
+                                key={req.id}
+                                className="flex items-center gap-3 p-3 bg-orange-50 rounded-2xl border border-orange-100"
+                              >
+                                {req.photoURL ? (
+                                  <img
+                                    src={req.photoURL}
+                                    alt={req.name}
+                                    className="w-10 h-10 rounded-full object-cover shrink-0"
+                                  />
+                                ) : (
+                                  <Avatar name={req.name} size="md" />
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-bold text-gray-800 text-sm truncate">
+                                    {req.name}
+                                  </p>
+                                  <p className="text-xs text-gray-500 truncate">
+                                    {req.email}
+                                  </p>
+                                </div>
+                                <div className="flex gap-2 shrink-0">
+                                  <button
+                                    onClick={() => handleAcceptRequest(req)}
+                                    className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                                  >
+                                    Chấp nhận
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeclineRequest(req.id)}
+                                    className="px-3 py-1.5 bg-gray-200 text-gray-600 text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                                  >
+                                    Xóa
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* List Contacts */}
                       <div className="space-y-3">
@@ -4298,7 +4880,16 @@ export default function App() {
                               key={c.id}
                               className="flex items-center gap-3 p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-blue-200 transition-all group"
                             >
-                              <Avatar name={c.name} size="md" />
+                              {/* [SỬA]: Ưu tiên hiển thị ảnh thật nếu có */}
+                              {c.photoURL ? (
+                                <img
+                                  src={c.photoURL}
+                                  alt={c.name}
+                                  className="w-10 h-10 rounded-full object-cover border border-gray-200 shrink-0"
+                                />
+                              ) : (
+                                <Avatar name={c.name} size="md" />
+                              )}
                               <div className="flex-1 min-w-0">
                                 <p className="font-bold text-gray-800 text-sm truncate">
                                   {c.name}
@@ -4314,12 +4905,21 @@ export default function App() {
                                 )}
                               </div>
                               {/* Nút Sửa (MỚI) */}
-                              <button
-                                onClick={() => setEditingContact(c)}
-                                className="p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm border border-gray-100"
-                              >
-                                <Edit2 size={16} />
-                              </button>
+                              {/* Nút Sửa & Xóa (MỚI) */}
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => setEditingContact(c)}
+                                  className="p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm border border-gray-100"
+                                >
+                                  <Edit2 size={16} />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteContact(c.id)}
+                                  className="p-2 bg-white text-gray-400 hover:text-red-500 rounded-lg shadow-sm border border-gray-100"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
                             </div>
                           ))
                         )}
@@ -4515,7 +5115,15 @@ export default function App() {
                           className="flex justify-between items-center p-3 bg-gray-50 rounded-xl"
                         >
                           <div className="flex items-center gap-3">
-                            <Avatar name={p.name} size="md" />
+                            {p.photoURL ? (
+                              <img
+                                src={p.photoURL}
+                                alt={p.name}
+                                className="w-10 h-10 rounded-full object-cover shadow-sm border border-gray-100 shrink-0"
+                              />
+                            ) : (
+                              <Avatar name={p.name} size="md" />
+                            )}
                             <div>
                               <p className="font-bold text-gray-800 text-sm">
                                 {p.name}
@@ -4580,6 +5188,7 @@ export default function App() {
                       {/* Debt Cards */}
                       {sortedPeople
                         .filter((p) => p.id !== user?.uid) // Lọc bỏ chính mình
+                        .filter((p) => calculateNetDebt(p.id) !== 0) // [SỬA MỚI]: Ẩn những người không có nợ nần gì với TÔI
                         .map((p) => {
                           const debt = calculateNetDebt(p.id);
                           return (
@@ -4614,7 +5223,15 @@ export default function App() {
                                 </button>
                               )}
 
-                              <Avatar name={p.name} size="md" />
+                              {p.photoURL ? (
+                                <img
+                                  src={p.photoURL}
+                                  alt={p.name}
+                                  className="w-10 h-10 rounded-full object-cover shadow-sm border border-gray-100 shrink-0"
+                                />
+                              ) : (
+                                <Avatar name={p.name} size="md" />
+                              )}
                               <div className="text-center w-full">
                                 <p className="font-bold text-gray-800 text-xs truncate w-full mb-1">
                                   {p.name}
@@ -4661,8 +5278,13 @@ export default function App() {
                         <div className="space-y-3 pb-2">
                           {/* Thêm pb-2 để item cuối không bị sát mép dưới quá */}
                           {expenses
+                            .filter(
+                              (e) =>
+                                e.payerId === user?.uid ||
+                                e.sharedWith.includes(user?.uid),
+                            )
                             .slice(0, 50)
-                            .map((exp) => renderHistoryItem(exp, true))}
+                            .map((e) => renderHistoryItem(e))}
                         </div>
                       )}
                     </div>
@@ -4689,7 +5311,11 @@ export default function App() {
                     if (!p) return null;
                     const debt = calculateNetDebt(p.id);
                     const related = expenses.filter(
-                      (e) => e.sharedWith.includes(p.id) || e.payerId === p.id,
+                      (e) =>
+                        (e.payerId === user?.uid &&
+                          e.sharedWith.includes(p.id)) ||
+                        (e.payerId === p.id &&
+                          e.sharedWith.includes(user?.uid)),
                     );
 
                     return (
@@ -4698,6 +5324,7 @@ export default function App() {
                           <Avatar
                             name={p.name}
                             size="lg"
+                            src={p.photoURL}
                             className="mx-auto mb-3 shadow-lg"
                           />
                           <h2 className="text-2xl font-bold text-gray-800">
@@ -4821,37 +5448,76 @@ export default function App() {
                     <Users className="text-blue-600" /> Danh bạ bạn bè
                   </h2>
 
-                  {/* FORM THÊM BẠN VÀO DANH BẠ */}
-                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 mb-6 flex gap-4 items-end">
-                    <div className="flex-1 space-y-1">
-                      <label className="text-xs font-bold text-gray-500 uppercase">
-                        Tên gợi nhớ
-                      </label>
-                      <input
-                        value={newPersonName}
-                        onChange={(e) => setNewPersonName(e.target.value)}
-                        className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
-                        placeholder="Ví dụ: GDragon..."
-                      />
-                    </div>
-                    <div className="flex-1 space-y-1">
-                      <label className="text-xs font-bold text-gray-500 uppercase">
-                        Email (để Buzz)
-                      </label>
+                  {/* FORM TÌM & GỬI LỜI MỜI */}
+                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 mb-6">
+                    <label className="text-xs font-bold text-gray-500 uppercase mb-2 block">
+                      Tìm kiếm bạn bè qua Email
+                    </label>
+                    <div className="flex gap-4">
                       <input
                         value={newPersonEmail}
                         onChange={(e) => setNewPersonEmail(e.target.value)}
-                        className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
-                        placeholder="example@gmail.com"
+                        className="flex-1 p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
+                        placeholder="Nhập email bạn bè..."
                       />
+                      <button
+                        onClick={sendFriendRequest}
+                        className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-transform active:scale-95 shrink-0"
+                      >
+                        Gửi lời mời kết bạn
+                      </button>
                     </div>
-                    <button
-                      onClick={addToContacts}
-                      className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-transform active:scale-95"
-                    >
-                      + Thêm vào danh bạ
-                    </button>
                   </div>
+
+                  {/* KHU VỰC HIỂN THỊ LỜI MỜI KẾT BẠN */}
+                  {friendRequests?.length > 0 && (
+                    <div className="mb-6 bg-orange-50/50 p-6 rounded-2xl border border-orange-100">
+                      <p className="text-sm font-bold text-orange-600 uppercase mb-4 flex items-center gap-2">
+                        <Bell size={18} className="animate-bounce" /> Lời mời
+                        đang chờ ({friendRequests.length})
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {friendRequests.map((req) => (
+                          <div
+                            key={req.id}
+                            className="flex items-center gap-3 p-4 bg-white rounded-2xl border border-orange-200 shadow-sm"
+                          >
+                            {req.photoURL ? (
+                              <img
+                                src={req.photoURL}
+                                alt={req.name}
+                                className="w-12 h-12 rounded-full object-cover shrink-0"
+                              />
+                            ) : (
+                              <Avatar name={req.name} size="md" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="font-bold text-gray-800 truncate">
+                                {req.name}
+                              </p>
+                              <p className="text-xs text-gray-500 truncate">
+                                {req.email}
+                              </p>
+                            </div>
+                            <div className="flex flex-col gap-1 shrink-0">
+                              <button
+                                onClick={() => handleAcceptRequest(req)}
+                                className="px-3 py-1.5 bg-blue-600 text-white text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                              >
+                                Chấp nhận
+                              </button>
+                              <button
+                                onClick={() => handleDeclineRequest(req.id)}
+                                className="px-3 py-1.5 bg-gray-100 text-gray-600 text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                              >
+                                Từ chối
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* LIST DANH BẠ HIỆN CÓ */}
                   <div className="flex-1 bg-white rounded-[2rem] shadow-sm border border-gray-200 overflow-hidden flex flex-col">
@@ -4873,7 +5539,16 @@ export default function App() {
                               key={contact.id}
                               className="flex items-center gap-4 p-4 bg-gray-50 rounded-2xl border border-gray-100 relative group hover:bg-white hover:shadow-md transition-all"
                             >
-                              <Avatar name={contact.name} size="md" />
+                              {/* [SỬA]: Ưu tiên hiển thị ảnh thật nếu có */}
+                              {contact.photoURL ? (
+                                <img
+                                  src={contact.photoURL}
+                                  alt={contact.name}
+                                  className="w-10 h-10 rounded-full object-cover border border-gray-200 shrink-0"
+                                />
+                              ) : (
+                                <Avatar name={contact.name} size="md" />
+                              )}
                               <div className="flex-1 min-w-0">
                                 <h4 className="font-bold text-gray-800 truncate">
                                   {contact.name}
@@ -4890,13 +5565,25 @@ export default function App() {
                               </div>
 
                               {/* Nút Sửa (Hiện khi hover - MỚI) */}
-                              <button
-                                onClick={() => setEditingContact(contact)}
-                                className="absolute top-4 right-4 p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition-all hover:scale-110"
-                                title="Sửa thông tin"
-                              >
-                                <Edit2 size={16} />
-                              </button>
+                              {/* Nút Sửa và Xóa (Hiện khi hover - MỚI) */}
+                              <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-all flex gap-2">
+                                <button
+                                  onClick={() => setEditingContact(contact)}
+                                  className="p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm hover:scale-110 transition-all"
+                                  title="Sửa thông tin"
+                                >
+                                  <Edit2 size={16} />
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleDeleteContact(contact.id)
+                                  }
+                                  className="p-2 bg-white text-gray-400 hover:text-red-500 rounded-lg shadow-sm hover:scale-110 transition-all"
+                                  title="Xóa liên hệ"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
                             </div>
                           ))
                         )}
@@ -4973,7 +5660,11 @@ export default function App() {
                                 className="flex justify-between items-center p-3 hover:bg-gray-50 rounded-xl transition-colors border-b border-gray-50 last:border-0"
                               >
                                 <div className="flex items-center gap-3">
-                                  <Avatar name={item.name} size="md" />
+                                  <Avatar
+                                    name={item.name}
+                                    size="md"
+                                    src={item.avatar}
+                                  />
                                   <div>
                                     <p className="font-bold text-gray-800">
                                       {item.name}
@@ -5127,7 +5818,10 @@ export default function App() {
                           const debt = calculateNetDebt(p.id);
                           const related = expenses.filter(
                             (e) =>
-                              e.sharedWith.includes(p.id) || e.payerId === p.id,
+                              (e.payerId === user?.uid &&
+                                e.sharedWith.includes(p.id)) ||
+                              (e.payerId === p.id &&
+                                e.sharedWith.includes(user?.uid)),
                           );
                           return (
                             <div className="max-w-3xl mx-auto">
@@ -5251,7 +5945,15 @@ export default function App() {
                               className="p-4 bg-gray-50 rounded-2xl flex justify-between items-center group hover:bg-white hover:shadow-md transition-all border border-transparent hover:border-gray-100"
                             >
                               <div className="flex items-center gap-4">
-                                <Avatar name={p.name} size="md" />
+                                {p.photoURL ? (
+                                  <img
+                                    src={p.photoURL}
+                                    alt={p.name}
+                                    className="w-10 h-10 rounded-full object-cover shadow-sm border border-gray-100 shrink-0"
+                                  />
+                                ) : (
+                                  <Avatar name={p.name} size="md" />
+                                )}
                                 <div>
                                   <div className="font-bold text-lg text-gray-700">
                                     {p.name}
@@ -5335,6 +6037,7 @@ export default function App() {
                                       <Avatar
                                         name={person.name}
                                         size="md"
+                                        src={person.photoURL}
                                         className="mb-2 shadow-sm"
                                       />
                                       <p className="font-bold text-gray-800 text-sm line-clamp-1 w-full px-1">
@@ -5463,8 +6166,13 @@ export default function App() {
                             </div>
                           )}
                           {expenses
+                            .filter(
+                              (exp) =>
+                                exp.payerId === user?.uid ||
+                                exp.sharedWith.includes(user?.uid),
+                            )
                             .slice(0, 50)
-                            .map((e) => renderHistoryItem(e))}
+                            .map((exp) => renderHistoryItem(exp, true))}
                         </div>
                       </div>
                     </div>
