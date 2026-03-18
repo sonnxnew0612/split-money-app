@@ -34,7 +34,10 @@ import {
   Settings,
   Eye,
   EyeOff,
+  UserMinus,
+  Link,
 } from "lucide-react";
+import appIcon from "./assets/icon.png";
 import { v4 as uuidv4 } from "uuid";
 import { format } from "date-fns";
 import { auth } from "./firebaseConfig";
@@ -115,6 +118,20 @@ const GROUP_ICONS = [
   "🎁",
 ];
 
+const playBuzzSound = () => {
+  try {
+    const audio = new Audio("/buzz.mp3");
+    audio.play();
+
+    // Nếu bạn muốn rung điện thoại (cần hỗ trợ từ trình duyệt/Capacitor)
+    if (navigator.vibrate) {
+      navigator.vibrate([200, 100, 200, 100, 500]); // Rung tít tít... tíiiit
+    }
+  } catch (e) {
+    console.error("Lỗi phát âm thanh:", e);
+  }
+};
+
 // --- COMPONENTS ---
 const Toast = ({ message, type = "error", onClose }) => {
   if (!message) return null;
@@ -145,26 +162,35 @@ const Toast = ({ message, type = "error", onClose }) => {
 
 // --- COMPONENT XÁC NHẬN XÓA (Custom Dialog) ---
 const ConfirmDialog = ({ isOpen, onClose, onConfirm, title, message }) => {
+  const [isLoading, setIsLoading] = React.useState(false);
+
+  React.useEffect(() => {
+    if (isOpen) setIsLoading(false);
+  }, [isOpen]);
+
   if (!isOpen) return null;
+
+  const handleConfirm = async () => {
+    setIsLoading(true);
+    await onConfirm();
+    // Đóng form sẽ do component cha quản lý
+  };
 
   return (
     <div
-      className="fixed inset-0 z-[600] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
-      onClick={onClose} // Bấm ra ngoài thì đóng
+      className="fixed inset-0 z-[600] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in cursor-pointer" // <-- Sửa cho iPad
+      onClick={!isLoading ? onClose : undefined}
     >
       <div
-        className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-scale-up"
-        onClick={(e) => e.stopPropagation()} // Chặn click xuyên
+        className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 animate-scale-up cursor-default" // <-- Sửa cho iPad
+        onClick={(e) => e.stopPropagation()}
       >
-        {/* Icon cảnh báo */}
         <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-4 text-red-600">
           <Trash2 size={24} />
         </div>
-
         <h3 className="text-xl font-bold text-center text-gray-800 mb-2">
           {title || "Xác nhận xóa"}
         </h3>
-
         <p className="text-gray-500 text-center mb-6 text-sm leading-relaxed">
           {message ||
             "Hành động này không thể hoàn tác. Bạn có chắc chắn muốn tiếp tục?"}
@@ -173,15 +199,21 @@ const ConfirmDialog = ({ isOpen, onClose, onConfirm, title, message }) => {
         <div className="flex gap-3">
           <button
             onClick={onClose}
-            className="flex-1 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors"
+            disabled={isLoading}
+            className="flex-1 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200 transition-colors disabled:opacity-50"
           >
             Hủy bỏ
           </button>
           <button
-            onClick={onConfirm}
-            className="flex-1 py-3 bg-red-500 text-white font-bold rounded-xl hover:bg-red-600 shadow-lg shadow-red-200 transition-colors"
+            onClick={handleConfirm}
+            disabled={isLoading}
+            className="flex-1 py-3 bg-red-500 text-white font-bold rounded-xl hover:bg-red-600 shadow-lg shadow-red-200 transition-colors flex justify-center items-center disabled:opacity-50"
           >
-            Xóa ngay
+            {isLoading ? (
+              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+            ) : (
+              "Xóa ngay"
+            )}
           </button>
         </div>
       </div>
@@ -189,15 +221,46 @@ const ConfirmDialog = ({ isOpen, onClose, onConfirm, title, message }) => {
   );
 };
 
-// --- COMPONENT AVATAR (ĐÃ FIX CỠ CHỮ VÀ THÊM SIZE) ---
-const Avatar = ({ name, size = "md", className = "" }) => {
-  const isMe = name === "Tôi";
+// --- COMPONENT AVATAR (ĐÃ FIX TRỊỆT ĐỂ LỖI MÉO ẢNH TRÊN MOBILE) ---
+const Avatar = ({ name, src, size = "md", className = "" }) => {
+  const sizeClasses = {
+    xs: "w-6 h-6 text-[9px]",
+    sm: "w-8 h-8 text-[10px]",
+    md: "w-10 h-10 text-[12px]",
+    lg: "w-16 h-16 text-xl",
+    xl: "w-24 h-24 text-3xl",
+  };
+  const currentSizeClass = sizeClasses[size] || sizeClasses.md;
 
-  // Lấy 2 chữ cái đầu (VD: Xuân Sơn -> XS)
+  // NẾU CÓ ẢNH TỪ GOOGLE (SRC)
+  if (src) {
+    const dimensions = currentSizeClass.split(" ").slice(0, 2).join(" ");
+    return (
+      // 1. THẺ DIV BAO NGOÀI: Làm chiếc "khung" đóng cứng kích thước và bo tròn (overflow-hidden)
+      <div
+        className={`${dimensions} rounded-full overflow-hidden shrink-0 shadow-sm border border-gray-100 flex items-center justify-center bg-gray-50 ${className}`}
+      >
+        {/* 2. THẺ IMG BÊN TRONG: Đã thêm object-top và image-rendering */}
+        <img
+          src={src}
+          alt={name || "Avatar"}
+          // THÊM "object-top" ĐỂ KHUNG CẮT ẢNH ƯU TIÊN LẤY KHUÔN MẶT Ở NỬA TRÊN
+          className="w-full h-full object-cover object-top"
+          // BẬT CHẾ ĐỘ RENDER ẢNH SIÊU NÉT (Chống nhòe khi thu nhỏ)
+          style={{ imageRendering: "-webkit-optimize-contrast" }}
+        />
+      </div>
+    );
+  }
+
+  // NẾU KHÔNG CÓ ẢNH (CHỈ CÓ TÊN) -> GIỮ NGUYÊN CODE CỦA BẠN
+  const safeName = typeof name === "string" ? name.trim() : "?";
+  const isMe = safeName === "Tôi" || safeName.toLowerCase() === "me";
+
   const initials = isMe
     ? "ME"
-    : name
-    ? name
+    : safeName.length > 0
+    ? safeName
         .split(" ")
         .map((n) => n[0])
         .join("")
@@ -205,30 +268,19 @@ const Avatar = ({ name, size = "md", className = "" }) => {
         .toUpperCase()
     : "?";
 
+  // Bảng màu mới: Tone màu Pastel / Thanh lịch
   const colors = [
-    "bg-rose-500",
-    "bg-blue-500",
-    "bg-emerald-500",
-    "bg-amber-500",
-    "bg-violet-500",
-    "bg-pink-500",
-    "bg-cyan-500",
+    "bg-blue-400", // Xanh dương nhạt
+    "bg-indigo-400", // Xanh tím
+    "bg-violet-500", // Tím đậm
+    "bg-fuchsia-500", // Tím hồng năng động
+    "bg-emerald-400", // Xanh lá ngọc (Rất trend)
+    "bg-cyan-500", // Xanh lơ trong trẻo
+    "bg-amber-400", // Vàng cam ấm
   ];
 
-  const colorIndex = name ? name.length % colors.length : 0;
-  const bgColor = isMe ? "bg-slate-800" : colors[colorIndex];
-
-  // Định nghĩa kích thước và cỡ chữ tương ứng
-  const sizeClasses = {
-    xs: "w-6 h-6 text-[9px]", // <--- THÊM MỚI: Siêu nhỏ (cho list chọn người)
-    sm: "w-8 h-8 text-[10px]", // Nhỏ
-    md: "w-10 h-10 text-[12px]", // Vừa (giảm font một chút cho đẹp)
-    lg: "w-16 h-16 text-xl", // Lớn
-    xl: "w-24 h-24 text-3xl", // <--- THÊM MỚI: Siêu lớn (cho Profile)
-  };
-
-  // Fallback nếu truyền size lạ thì về md
-  const currentSizeClass = sizeClasses[size] || sizeClasses.md;
+  const colorIndex = safeName.length ? safeName.length % colors.length : 0;
+  const bgColor = isMe ? "bg-slate-700" : colors[colorIndex];
 
   return (
     <div
@@ -295,8 +347,70 @@ const HistoryModal = ({
   );
 };
 
+// --- COMPONENT HỢP NHẤT TÀI KHOẢN ---
+const MergeContactModal = ({
+  isOpen,
+  onClose,
+  fakeContact,
+  realContacts,
+  onConfirm,
+}) => {
+  if (!isOpen || !fakeContact) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[500] bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="bg-white rounded-2xl w-full max-w-md shadow-2xl p-6 animate-slide-up"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-xl font-bold text-gray-800 mb-2">
+          Liên kết tài khoản
+        </h3>
+        <p className="text-sm text-gray-500 mb-6">
+          Chọn một người bạn <b>đã kết bạn (có Email)</b> để thay thế cho tài
+          khoản ảo <b className="text-indigo-600">{fakeContact.name}</b> trong
+          tất cả các nhóm.
+        </p>
+
+        <div className="max-h-[50vh] overflow-y-auto custom-scrollbar space-y-2">
+          {realContacts.length === 0 ? (
+            <p className="text-center text-sm italic text-gray-400 py-4">
+              Bạn chưa có bạn bè nào có Email để liên kết.
+            </p>
+          ) : (
+            realContacts.map((friend) => (
+              <button
+                key={friend.id}
+                onClick={() => onConfirm(friend)}
+                className="w-full flex items-center gap-3 p-3 rounded-xl border border-gray-100 hover:border-blue-500 hover:bg-violet-50/50 transition-all text-left"
+              >
+                <Avatar name={friend.name} src={friend.photoURL} size="md" />
+                <div className="flex-1">
+                  <p className="font-bold text-gray-800">{friend.name}</p>
+                  <p className="text-xs text-gray-500">{friend.email}</p>
+                </div>
+                <div className="text-xs font-bold text-indigo-600 bg-white px-2 py-1 rounded-lg border border-violet-100">
+                  Chọn
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+        <button
+          onClick={onClose}
+          className="w-full mt-4 py-3 bg-gray-100 text-gray-700 font-bold rounded-xl hover:bg-gray-200"
+        >
+          Hủy bỏ
+        </button>
+      </div>
+    </div>
+  );
+};
+
 // --- COMPONENT EXPENSE MODAL (FINAL FIX: SPLIT AUTO-INCLUDE & FULL SINGLE SELECT) ---
-// --- COMPONENT EXPENSE MODAL (FULL GỐC + FIX AVATAR + FIX LOGIC) ---
 const ExpenseModal = ({
   isOpen,
   onClose,
@@ -317,6 +431,8 @@ const ExpenseModal = ({
     payerId: "me",
     type: "split",
     customShares: {},
+    shippingFee: "",
+    discount: "",
     billImage: null,
     comments: [],
     loanType: "lend",
@@ -326,7 +442,7 @@ const ExpenseModal = ({
   const [uploading, setUploading] = useState(false);
   const [commentText, setCommentText] = useState("");
 
-  // --- HELPER MỚI: RENDER AVATAR (Ưu tiên ảnh Google) ---
+  // --- HELPER MỚI: RENDER AVATAR ---
   const renderMyAvatar = (size = "sm") => {
     const sizeClasses = {
       xs: "w-6 h-6 text-[10px]",
@@ -342,7 +458,7 @@ const ExpenseModal = ({
           alt="Me"
           className={`${css.split(" ")[0]} ${
             css.split(" ")[1]
-          } rounded-full object-cover border border-gray-200 shrink-0`}
+          } rounded-full object-cover shadow-sm border-2 border-white shrink-0`}
         />
       );
     }
@@ -363,6 +479,8 @@ const ExpenseModal = ({
           payerId: editingExpense.payerId || "me",
           type: editingExpense.type || "split",
           customShares: editingExpense.customShares || {},
+          shippingFee: "",
+          discount: "",
           billImage: editingExpense.billImage || null,
           comments: editingExpense.comments || [],
           loanType: "lend",
@@ -402,7 +520,6 @@ const ExpenseModal = ({
 
   // --- HANDLERS: CHIA TIỀN ---
   const togglePerson = (id) => {
-    // Nếu là Ứng/Vay (full) -> Chỉ được chọn 1 người
     if (form.type === "full") {
       setForm({ ...form, sharedWith: [id] });
       return;
@@ -424,19 +541,6 @@ const ExpenseModal = ({
         : [...list, id],
       customShares: newCustomShares,
     });
-  };
-
-  const handleCustomShareChange = (id, value) => {
-    const rawValue = value.replace(/\./g, "");
-    if (/^\d*$/.test(rawValue)) {
-      setForm({
-        ...form,
-        customShares: {
-          ...form.customShares,
-          [id]: rawValue,
-        },
-      });
-    }
   };
 
   const getPayerName = () => {
@@ -490,64 +594,77 @@ const ExpenseModal = ({
 
   // --- SAVE ---
   const handleSave = () => {
-    const totalAmount = parseInt(form.amount || 0);
-    if (totalAmount === 0) {
-      showToast("Vui lòng nhập số tiền!", "error");
-      return;
-    }
     if (!form.description.trim()) {
       showToast("Vui lòng nhập nội dung!", "error");
       return;
     }
 
-    // Validate Custom Split
     if (form.type === "custom") {
       let currentSum = 0;
-      const autoSharedWith = []; // Danh sách người tham gia tự động dựa trên số tiền nhập
+      const autoSharedWith = [];
 
-      // 1. Quét phần của TÔI
-      const myShare = parseInt(form.customShares["me"] || 0);
-      if (myShare > 0) {
-        currentSum += myShare;
-        // Logic cũ của bạn có thể không push "me" vào sharedWith, tùy cách bạn xử lý backend
-        // Nhưng thường custom thì ta chỉ cần đảm bảo tổng đúng.
+      const ship = parseInt(form.shippingFee) || 0;
+      const disc = parseInt(form.discount) || 0;
+      const netDiscount = disc - ship;
+
+      let activeCount = 0;
+      if (parseInt(form.customShares["me"] || 0) > 0) activeCount++;
+      people.forEach((p) => {
+        if (p.id !== user?.uid && parseInt(form.customShares[p.id] || 0) > 0) {
+          activeCount++;
+        }
+      });
+
+      const adjustment =
+        activeCount > 0 ? Math.floor(netDiscount / activeCount) : 0;
+      const finalSharesToSave = {};
+
+      const myOriginalShare = parseInt(form.customShares["me"] || 0);
+      if (myOriginalShare > 0) {
+        const finalShare = Math.max(0, myOriginalShare - adjustment);
+        finalSharesToSave["me"] = finalShare.toString();
+        currentSum += finalShare;
       }
 
-      // 2. Quét phần của CÁC THÀNH VIÊN KHÁC
       people.forEach((p) => {
-        if (p.id === user?.uid) return; // Bỏ qua tôi (đã tính ở trên)
-        const s = parseInt(form.customShares[p.id] || 0);
-        if (s > 0) {
-          currentSum += s;
+        if (p.id === user?.uid) return;
+        const originalShare = parseInt(form.customShares[p.id] || 0);
+        if (originalShare > 0) {
+          const finalShare = Math.max(0, originalShare - adjustment);
+          finalSharesToSave[p.id] = finalShare.toString();
+          currentSum += finalShare;
           autoSharedWith.push(p.id);
         }
       });
 
-      if (currentSum !== totalAmount) {
-        showToast(
-          `Tổng chia (${formatCurrency(
-            currentSum,
-          )}) khác tổng bill (${formatCurrency(totalAmount)})!`,
-          "error",
-        );
+      if (currentSum === 0) {
+        showToast("Vui lòng nhập số tiền cho ít nhất 1 người!", "error");
         return;
       }
 
-      // [FIX 2] Tự động cập nhật danh sách sharedWith dựa trên những ai có tiền > 0
-      // Điều này giúp user không cần phải bấm chọn từng người thủ công
+      form.customShares = finalSharesToSave;
       form.sharedWith = autoSharedWith;
-    }
+      form.amount = currentSum.toString();
 
-    // Validate Full (Ứng/Vay)
-    if (form.type === "full") {
-      const targetId =
-        form.loanType === "lend" ? form.sharedWith[0] : form.payerId;
-      if (
-        !targetId ||
-        (form.loanType === "lend" && form.sharedWith.length === 0)
-      ) {
-        showToast("Vui lòng chọn người vay/cho vay!", "error");
+      delete form.shippingFee;
+      delete form.discount;
+    } else {
+      const totalAmount = parseInt(form.amount || 0);
+      if (totalAmount === 0) {
+        showToast("Vui lòng nhập số tiền!", "error");
         return;
+      }
+
+      if (form.type === "full") {
+        const targetId =
+          form.loanType === "lend" ? form.sharedWith[0] : form.payerId;
+        if (
+          !targetId ||
+          (form.loanType === "lend" && form.sharedWith.length === 0)
+        ) {
+          showToast("Vui lòng chọn người vay/cho vay!", "error");
+          return;
+        }
       }
     }
 
@@ -555,256 +672,494 @@ const ExpenseModal = ({
   };
 
   return (
-    <div className="fixed inset-0 z-[100] flex items-end md:items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in">
-      <div className="bg-gray-100 md:bg-white w-full max-w-lg md:max-w-2xl h-[90vh] md:h-[85vh] rounded-t-[2rem] md:rounded-3xl shadow-2xl flex flex-col overflow-hidden animate-slide-up md:animate-none relative">
-        {/* === MAIN VIEW === */}
-        <div
-          className={`flex flex-col h-full transition-transform duration-300 ease-in-out ${
-            currentView === "form" ? "translate-x-0" : "-translate-x-full"
-          }`}
-        >
-          {/* HEADER */}
-          <div className="px-4 py-4 bg-white border-b flex justify-between items-center shrink-0">
-            <button
-              onClick={onClose}
-              className="text-blue-600 font-medium text-base"
-            >
-              Hủy
-            </button>
-            <h2 className="font-bold text-lg text-gray-800">
-              {editingExpense ? "Sửa khoản chi" : "Thêm khoản chi"}
-            </h2>
-            <button
-              onClick={handleSave}
-              className="text-blue-600 font-bold text-base"
-            >
-              Xong
-            </button>
-          </div>
+    <div className="fixed inset-0 z-[600] flex items-end md:items-center justify-center pointer-events-none">
+      {/* NỀN ĐEN LÀM MỜ */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm pointer-events-auto"
+        onClick={onClose}
+      />
 
-          {/* SCROLLABLE CONTENT */}
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
-            {/* 1. INPUT TIỀN & INFO */}
-            <div className="bg-white rounded-2xl overflow-hidden shadow-sm">
-              <div className="p-4 border-b border-gray-100 flex items-center">
-                <span className="w-24 font-medium text-gray-500">Số tiền</span>
-                <input
-                  type="text"
-                  inputMode="numeric"
-                  className="flex-1 text-right font-bold text-xl text-blue-600 outline-none placeholder-gray-300"
-                  placeholder="0"
-                  value={
-                    form.amount
-                      ? form.amount.replace(/\B(?=(\d{3})+(?!\d))/g, ".")
-                      : ""
-                  }
-                  onChange={(e) => {
-                    const rawValue = e.target.value.replace(/\./g, "");
-                    if (/^\d*$/.test(rawValue))
-                      setForm({ ...form, amount: rawValue });
+      {/* KHUNG MODAL */}
+      <motion.div
+        initial={{ y: "100%" }}
+        animate={{ y: 0 }}
+        exit={{ y: "100%" }}
+        transition={{ type: "spring", damping: 28, stiffness: 300 }}
+        className="bg-gray-50 md:bg-white w-full md:max-w-md pointer-events-auto rounded-t-[2.5rem] md:rounded-[2rem] shadow-2xl flex flex-col h-[90vh] md:h-[85vh] relative overflow-hidden"
+      >
+        {/* CONTAINER CHỨA CÁC MÀN HÌNH (TRƯỢT QUA LẠI) */}
+        <div className="flex-1 w-full relative">
+          {/* ======================================================= */}
+          {/* MÀN HÌNH 1: NHẬP THÔNG TIN GIAO DỊCH                      */}
+          {/* ======================================================= */}
+          <div
+            className={`absolute inset-0 w-full h-full flex flex-col transition-transform duration-300 ease-in-out ${
+              currentView === "form" ? "translate-x-0" : "-translate-x-full"
+            }`}
+          >
+            {/* Thanh vuốt & Nút đóng */}
+            <div className="shrink-0 bg-white md:bg-transparent rounded-t-[2.5rem] md:rounded-none z-10 pb-2">
+              <div className="w-12 h-1.5 bg-gray-200 rounded-full mx-auto mt-3 md:hidden" />
+              <div className="flex justify-between items-center px-6 py-3">
+                <h2 className="text-lg font-black text-gray-800 tracking-tight">
+                  {editingExpense ? "Sửa giao dịch" : "Thêm khoản chi"}
+                </h2>
+                {/* Dùng p-2 thay vì w-12 h-12 như code cũ của bạn */}
+                <button
+                  onClick={onClose}
+                  className="p-2 bg-gray-100 rounded-full text-gray-500 hover:bg-rose-100 hover:text-indigo-500 transition-colors"
+                >
+                  <X size={20} strokeWidth={2.5} />
+                </button>
+              </div>
+            </div>
+
+            {/* Nội dung cuộn được */}
+            <div className="flex-1 overflow-y-auto px-4 pb-[100px] pt-2 custom-scrollbar space-y-5 bg-white md:bg-transparent rounded-t-3xl shadow-[inset_0_10px_20px_rgba(0,0,0,0.02)]">
+              {/* --- 1. Tab Chọn Chế Độ (Pill Style) --- */}
+              <div className="flex bg-gray-100/80 p-1.5 rounded-2xl relative mb-2">
+                {["split", "custom", "full"].map((tabMode, index) => {
+                  const isActive = form.type === tabMode;
+                  const labels = {
+                    split: "Chia đều",
+                    custom: "Cụ thể",
+                    full: "Ứng/Vay",
+                  };
+                  return (
+                    <button
+                      key={tabMode}
+                      onClick={() => setForm({ ...form, type: tabMode })}
+                      className={`flex-1 py-2.5 rounded-xl font-bold text-sm z-10 transition-colors duration-300 ${
+                        isActive
+                          ? "text-indigo-600 shadow-sm"
+                          : "text-gray-400 hover:text-gray-600"
+                      }`}
+                    >
+                      {labels[tabMode]}
+                    </button>
+                  );
+                })}
+                {/* Thanh trượt nền */}
+                <div
+                  className="absolute top-1.5 bottom-1.5 w-[calc(33.33%-4px)] bg-white rounded-xl shadow-sm border border-gray-100 transition-all duration-300 ease-out"
+                  style={{
+                    left:
+                      form.type === "split"
+                        ? "6px"
+                        : form.type === "custom"
+                        ? "calc(33.33% + 2px)"
+                        : "calc(66.66% - 2px)",
                   }}
-                  autoFocus={!editingExpense}
                 />
               </div>
-              <div className="p-4 border-b border-gray-100 flex items-center">
-                <span className="w-24 font-medium text-gray-500">Tiêu đề</span>
-                <input
-                  className="flex-1 text-right font-medium text-gray-800 outline-none placeholder-gray-300"
-                  placeholder="Ăn trưa, cafe..."
-                  value={form.description}
-                  onChange={(e) =>
-                    setForm({ ...form, description: e.target.value })
+
+              {/* --- 2. Ô NHẬP SỐ TIỀN KHỔNG LỒ (ĐÃ SỬA AUTO-SHRINK CHUẨN) --- */}
+              <div className="text-center bg-gradient-to-br from-indigo-50 to-violet-50 p-6 rounded-[2rem] border border-indigo-100/50 shadow-sm relative overflow-hidden">
+                <div className="absolute top-[-20px] right-[-20px] w-24 h-24 bg-white/40 rounded-full blur-2xl"></div>
+                <label className="text-[11px] font-black text-indigo-400 uppercase tracking-widest mb-2 block relative z-10">
+                  Tổng số tiền
+                </label>
+
+                {/* Dùng logic JS để thu nhỏ font chữ dựa vào SỐ LƯỢNG CHỮ SỐ GỐC */}
+                {(() => {
+                  const displayValue = form.amount
+                    ? form.amount.replace(/\B(?=(\d{3})+(?!\d))/g, ".")
+                    : "";
+
+                  // ĐẾM SỐ CHỮ SỐ GỐC (Bỏ qua dấu chấm)
+                  const rawLen = form.amount ? form.amount.length : 0;
+
+                  let textSize = "text-5xl md:text-6xl"; // Mặc định: Dưới 9 chữ số (Tối đa 99.999.999)
+                  let symbolSize = "text-2xl pb-2";
+
+                  if (rawLen >= 12) {
+                    // Từ Trăm Tỷ trở lên (12 chữ số)
+                    textSize = "text-2xl md:text-3xl";
+                    symbolSize = "text-lg pb-0.5";
+                  } else if (rawLen >= 10) {
+                    // Từ 1 Tỷ đến Chục Tỷ (10-11 chữ số)
+                    textSize = "text-3xl md:text-4xl";
+                    symbolSize = "text-xl pb-1";
+                  } else if (rawLen >= 9) {
+                    // TỪ 9 CHỮ SỐ MỚI BẮT ĐẦU THU NHỎ (Từ 100.000.000)
+                    textSize = "text-4xl md:text-5xl";
+                    symbolSize = "text-xl pb-1.5";
                   }
-                />
+
+                  return (
+                    <div
+                      className={`flex items-center justify-center font-black text-indigo-600 relative z-10 transition-all duration-300 ease-out ${textSize}`}
+                    >
+                      <span
+                        className={`${symbolSize} mr-1 text-indigo-400 transition-all duration-300 ease-out`}
+                      >
+                        đ
+                      </span>
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        autoFocus={!editingExpense}
+                        className="bg-transparent outline-none w-full text-center placeholder-indigo-200 caret-indigo-600 transition-all duration-300"
+                        placeholder="0"
+                        value={displayValue}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/\./g, "");
+                          if (/^\d*$/.test(val))
+                            setForm({ ...form, amount: val });
+                        }}
+                      />
+                    </div>
+                  );
+                })()}
               </div>
-              <div className="p-4 flex items-center">
-                <span className="w-24 font-medium text-gray-500">Ngày</span>
+
+              {/* --- 3. Tiêu đề & Ngày tháng --- */}
+              <div className="space-y-3">
+                <div className="relative group">
+                  <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none text-gray-300 group-focus-within:text-rose-400 transition-colors">
+                    <Edit2 size={18} />
+                  </div>
+                  <input
+                    type="text"
+                    placeholder="Khoản chi này cho việc gì?"
+                    className="w-full pl-12 pr-4 py-4 bg-gray-50 rounded-2xl font-bold text-gray-700 outline-none focus:bg-white focus:ring-2 ring-indigo-200 transition-all placeholder-gray-400 shadow-sm"
+                    value={form.description}
+                    onChange={(e) =>
+                      setForm({ ...form, description: e.target.value })
+                    }
+                  />
+                </div>
                 <input
                   type="date"
-                  className="flex-1 text-right font-bold text-gray-700 outline-none bg-transparent"
+                  className="w-full px-5 py-4 bg-gray-50 rounded-2xl font-bold text-gray-500 outline-none focus:bg-white focus:ring-2 ring-indigo-200 transition-all shadow-sm"
                   value={form.date}
                   onChange={(e) => setForm({ ...form, date: e.target.value })}
                 />
               </div>
-            </div>
 
-            {/* 2. LOẠI CHIA & NGƯỜI TRẢ */}
-            <div className="space-y-4">
-              <div className="flex bg-gray-200 p-1 rounded-xl">
-                <button
-                  onClick={() => setForm({ ...form, type: "split" })}
-                  className={`flex-1 py-2 rounded-lg text-xs md:text-sm font-bold transition-all ${
-                    form.type === "split"
-                      ? "bg-white shadow text-black"
-                      : "text-gray-500"
-                  }`}
-                >
-                  Chia đều
-                </button>
-                <button
-                  onClick={() => setForm({ ...form, type: "custom" })}
-                  className={`flex-1 py-2 rounded-lg text-xs md:text-sm font-bold transition-all ${
-                    form.type === "custom"
-                      ? "bg-white shadow text-purple-600"
-                      : "text-gray-500"
-                  }`}
-                >
-                  Cụ thể
-                </button>
-                <button
-                  onClick={() => setForm({ ...form, type: "full" })}
-                  className={`flex-1 py-2 rounded-lg text-xs md:text-sm font-bold transition-all ${
-                    form.type === "full"
-                      ? "bg-white shadow text-orange-600"
-                      : "text-gray-500"
-                  }`}
-                >
-                  Ứng/Vay
-                </button>
-              </div>
-
+              {/* --- 4. Người trả tiền (Ẩn nếu là ứng/vay) --- */}
               {form.type !== "full" && (
                 <div
                   onClick={() => setCurrentView("payer_select")}
-                  className="bg-white rounded-2xl p-4 flex justify-between items-center shadow-sm active:bg-gray-50 transition-colors cursor-pointer"
+                  className="bg-white border border-gray-100 rounded-2xl p-4 flex justify-between items-center shadow-sm active:scale-[0.98] transition-all cursor-pointer group hover:border-indigo-200 hover:shadow-md"
                 >
-                  <span className="font-medium text-gray-500">
-                    Người trả tiền
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-gray-800">
-                      {getPayerName()}
-                    </span>
-                    <ChevronRight size={20} className="text-gray-300" />
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-violet-600">
+                      <Wallet size={20} />
+                    </div>
+                    <div>
+                      <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">
+                        Người trả tiền
+                      </p>
+                      <p className="font-bold text-gray-800 text-base">
+                        {getPayerName()}
+                      </p>
+                    </div>
                   </div>
+                  <ChevronRight
+                    size={20}
+                    className="text-gray-300 group-hover:text-rose-400 transition-colors"
+                  />
                 </div>
               )}
-            </div>
 
-            {/* 3. DANH SÁCH THÀNH VIÊN */}
-            <div>
-              <label className="text-xs font-bold text-gray-400 ml-4 mb-2 block uppercase">
-                {form.type === "custom"
-                  ? "Nhập số tiền từng người"
-                  : form.type === "full"
-                  ? "Chọn người giao dịch (Chỉ 1 người)"
-                  : "Chọn người chia cùng (Người trả mặc định có mặt)"}
-              </label>
+              {/* --- 5. Danh sách người tham gia --- */}
+              <div className="bg-white border border-gray-100 rounded-[2rem] p-4 shadow-sm">
+                <label className="text-[11px] font-black text-rose-400 ml-2 mb-4 block uppercase tracking-wider">
+                  {form.type === "custom"
+                    ? "Chi tiết từng người"
+                    : form.type === "full"
+                    ? "Chọn người giao dịch (1 người)"
+                    : "Chia cùng ai?"}
+                </label>
 
-              <div className="bg-white rounded-2xl p-2 md:p-4 shadow-sm space-y-2">
-                {/* ================= CASE 1: CỤ THỂ (CUSTOM) ================= */}
+                {/* ====== CASE 1: CUSTOM ====== */}
                 {form.type === "custom" && (
-                  <>
-                    {/* A. Dòng của TÔI */}
-                    <div className="flex items-center justify-between p-2 border-b border-gray-50">
-                      <div className="flex items-center gap-2">
-                        {renderMyAvatar("sm")} {/* SỬ DỤNG HELPER AVATAR */}
-                        <span className="font-bold text-gray-700">Tôi</span>
-                      </div>
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        placeholder="0"
-                        className="w-32 text-right p-2 bg-gray-50 rounded-lg font-bold text-purple-600 outline-none focus:ring-2 ring-purple-100"
-                        value={
-                          form.customShares["me"]
-                            ? formatNumber(form.customShares["me"])
-                            : ""
-                        }
-                        onChange={(e) => {
-                          const val = e.target.value.replace(/\./g, "");
-                          if (/^\d*$/.test(val)) {
-                            setForm({
-                              ...form,
-                              customShares: {
-                                ...form.customShares,
-                                ["me"]: val,
-                              },
-                            });
+                  <div className="space-y-4">
+                    {/* Ship & Discount */}
+                    <div className="flex gap-3 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-2xl border border-blue-100">
+                      <div className="flex-1">
+                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-1 block">
+                          Tiền Ship (+)
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="0"
+                          className="w-full p-2.5 bg-white rounded-xl font-bold text-gray-700 outline-none focus:ring-2 ring-blue-200 text-right shadow-sm"
+                          value={
+                            form.shippingFee
+                              ? form.shippingFee.replace(
+                                  /\B(?=(\d{3})+(?!\d))/g,
+                                  ".",
+                                )
+                              : ""
                           }
-                        }}
-                      />
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/\./g, "");
+                            if (/^\d*$/.test(val))
+                              setForm({ ...form, shippingFee: val });
+                          }}
+                        />
+                      </div>
+                      <div className="flex-1">
+                        <label className="text-[10px] font-black text-teal-500 uppercase tracking-widest mb-1 block">
+                          Giảm giá (-)
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          placeholder="0"
+                          className="w-full p-2.5 bg-white rounded-xl font-bold text-teal-600 outline-none focus:ring-2 ring-teal-200 text-right shadow-sm"
+                          value={
+                            form.discount
+                              ? form.discount.replace(
+                                  /\B(?=(\d{3})+(?!\d))/g,
+                                  ".",
+                                )
+                              : ""
+                          }
+                          onChange={(e) => {
+                            const val = e.target.value.replace(/\./g, "");
+                            if (/^\d*$/.test(val))
+                              setForm({ ...form, discount: val });
+                          }}
+                        />
+                      </div>
                     </div>
 
-                    {/* B. Các bạn bè */}
-                    {people
-                      .filter((p) => p.id !== user?.uid)
-                      .map((p) => (
-                        <div
-                          key={p.id}
-                          className="flex items-center justify-between p-2 border-b border-gray-50 last:border-0"
-                        >
-                          <div className="flex items-center gap-2 flex-1">
-                            <Avatar name={p.name} size="sm" />
-                            <span className="font-medium text-gray-700 truncate">
-                              {p.name}
-                            </span>
+                    {/* Vòng lặp người dùng */}
+                    {(() => {
+                      const ship = parseInt(form.shippingFee) || 0;
+                      const disc = parseInt(form.discount) || 0;
+                      const netDiscount = disc - ship;
+
+                      let activeCount = 0;
+                      let baseSum = 0;
+
+                      if (parseInt(form.customShares["me"] || 0) > 0) {
+                        activeCount++;
+                        baseSum += parseInt(form.customShares["me"]);
+                      }
+                      people.forEach((p) => {
+                        if (
+                          p.id !== user?.uid &&
+                          parseInt(form.customShares[p.id] || 0) > 0
+                        ) {
+                          activeCount++;
+                          baseSum += parseInt(form.customShares[p.id]);
+                        }
+                      });
+
+                      const adjustment =
+                        activeCount > 0
+                          ? Math.floor(netDiscount / activeCount)
+                          : 0;
+                      const hasAdjustment = ship > 0 || disc > 0;
+
+                      return (
+                        <>
+                          {hasAdjustment && activeCount > 0 && (
+                            <div className="mb-3 text-xs font-bold text-center px-3 py-2 rounded-xl bg-violet-50 text-violet-700 shadow-sm border border-violet-100">
+                              {netDiscount >= 0
+                                ? `🔥 Mỗi người được TRỪ: ${adjustment.toLocaleString()}đ`
+                                : `🛵 Mỗi người CỘNG THÊM phí: ${Math.abs(
+                                    adjustment,
+                                  ).toLocaleString()}đ`}
+                            </div>
+                          )}
+
+                          <div className="space-y-2">
+                            {/* Dòng Tôi */}
+                            <div className="flex items-center justify-between p-2.5 bg-gray-50 rounded-2xl border border-gray-100">
+                              <div className="flex items-center gap-3">
+                                {renderMyAvatar("md")}
+                                <span className="font-bold text-gray-700">
+                                  Tôi
+                                </span>
+                              </div>
+                              <div className="flex flex-col items-end">
+                                <input
+                                  type="text"
+                                  inputMode="numeric"
+                                  placeholder="0"
+                                  className={`w-32 text-right p-2 rounded-xl font-bold outline-none focus:ring-2 ring-indigo-200 ${
+                                    hasAdjustment
+                                      ? "bg-white text-gray-400 line-through"
+                                      : "bg-white text-indigo-600 shadow-sm"
+                                  }`}
+                                  value={
+                                    form.customShares["me"]
+                                      ? form.customShares["me"].replace(
+                                          /\B(?=(\d{3})+(?!\d))/g,
+                                          ".",
+                                        )
+                                      : ""
+                                  }
+                                  onChange={(e) => {
+                                    const val = e.target.value.replace(
+                                      /\./g,
+                                      "",
+                                    );
+                                    if (/^\d*$/.test(val))
+                                      setForm({
+                                        ...form,
+                                        customShares: {
+                                          ...form.customShares,
+                                          ["me"]: val,
+                                        },
+                                      });
+                                  }}
+                                />
+                                {hasAdjustment &&
+                                  parseInt(form.customShares["me"] || 0) >
+                                    0 && (
+                                    <span className="text-[11px] font-black text-indigo-600 mt-1.5 bg-indigo-50 px-2 py-0.5 rounded-md shadow-sm border border-rose-100">
+                                      Thực trả:{" "}
+                                      {Math.max(
+                                        0,
+                                        parseInt(form.customShares["me"]) -
+                                          adjustment,
+                                      ).toLocaleString()}
+                                      đ
+                                    </span>
+                                  )}
+                              </div>
+                            </div>
+
+                            {/* Dòng Bạn Bè */}
+                            {people
+                              .filter((p) => p.id !== user?.uid)
+                              .map((p) => {
+                                const valRaw = form.customShares[p.id];
+                                const valNum = parseInt(valRaw || 0);
+                                return (
+                                  <div
+                                    key={p.id}
+                                    className="flex items-center justify-between p-2.5 bg-gray-50 rounded-2xl border border-gray-100"
+                                  >
+                                    <div className="flex items-center gap-3 flex-1">
+                                      <Avatar
+                                        name={p.name}
+                                        src={p.photoURL}
+                                        size="md"
+                                      />
+                                      <span className="font-bold text-gray-700 truncate">
+                                        {p.name}
+                                      </span>
+                                    </div>
+                                    <div className="flex flex-col items-end">
+                                      <input
+                                        type="text"
+                                        inputMode="numeric"
+                                        placeholder="0"
+                                        className={`w-32 text-right p-2 rounded-xl font-bold outline-none focus:ring-2 ring-indigo-200 ${
+                                          hasAdjustment
+                                            ? "bg-white text-gray-400 line-through"
+                                            : "bg-white text-gray-700 focus:text-indigo-600 shadow-sm"
+                                        }`}
+                                        value={
+                                          valRaw
+                                            ? valRaw.replace(
+                                                /\B(?=(\d{3})+(?!\d))/g,
+                                                ".",
+                                              )
+                                            : ""
+                                        }
+                                        onChange={(e) => {
+                                          const val = e.target.value.replace(
+                                            /\./g,
+                                            "",
+                                          );
+                                          if (/^\d*$/.test(val))
+                                            setForm({
+                                              ...form,
+                                              customShares: {
+                                                ...form.customShares,
+                                                [p.id]: val,
+                                              },
+                                            });
+                                        }}
+                                      />
+                                      {hasAdjustment && valNum > 0 && (
+                                        <span className="text-[11px] font-black text-indigo-600 mt-1.5 bg-indigo-50 px-2 py-0.5 rounded-md shadow-sm border border-rose-100">
+                                          Thực trả:{" "}
+                                          {Math.max(
+                                            0,
+                                            valNum - adjustment,
+                                          ).toLocaleString()}
+                                          đ
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                );
+                              })}
                           </div>
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            placeholder="0"
-                            className="w-32 text-right p-2 bg-gray-50 rounded-lg font-bold text-gray-700 outline-none focus:ring-2 ring-blue-100 focus:text-blue-600"
-                            value={
-                              form.customShares[p.id]
-                                ? formatNumber(form.customShares[p.id])
-                                : ""
-                            }
-                            onChange={(e) => {
-                              const val = e.target.value.replace(/\./g, "");
-                              if (/^\d*$/.test(val)) {
-                                setForm({
-                                  ...form,
-                                  customShares: {
-                                    ...form.customShares,
-                                    [p.id]: val,
-                                  },
-                                });
-                              }
-                            }}
-                          />
-                        </div>
-                      ))}
-                    <div className="mt-2 text-right text-xs font-bold text-gray-500">
-                      Đã nhập:{" "}
-                      {formatCurrency(
-                        Object.values(form.customShares).reduce(
-                          (a, b) => a + (parseInt(b) || 0),
-                          0,
-                        ),
-                      )}{" "}
-                      / {formatCurrency(form.amount || 0)}
-                    </div>
-                  </>
+
+                          {/* Tổng Bill Hiện Tại */}
+                          <div className="mt-4 pt-3 border-t border-dashed border-gray-200 text-right">
+                            <span className="text-xs font-bold text-gray-400">
+                              Tiền món: {baseSum.toLocaleString()}đ
+                            </span>{" "}
+                            <br />
+                            {hasAdjustment && (
+                              <span className="text-indigo-600 font-black text-sm mt-1 inline-block bg-indigo-50 px-3 py-1 rounded-lg">
+                                TỔNG BILL THỰC TẾ:{" "}
+                                {Math.max(
+                                  0,
+                                  baseSum - netDiscount,
+                                ).toLocaleString()}
+                                đ
+                              </span>
+                            )}
+                          </div>
+                        </>
+                      );
+                    })()}
+                  </div>
                 )}
 
-                {/* ================= CASE 2: CHIA ĐỀU (SPLIT) ================= */}
+                {/* ====== CASE 2: SPLIT ====== */}
                 {form.type === "split" && (
-                  <>
-                    {/* A. Dòng của TÔI (ẨN NẾU LÀ NGƯỜI TRẢ) */}
+                  <div className="space-y-2">
                     {form.payerId !== "me" && (
                       <button
                         onClick={() => togglePerson("me")}
-                        className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all ${
+                        className={`w-full p-3.5 rounded-2xl flex items-center gap-4 transition-all border ${
                           form.sharedWith.includes(user.uid)
-                            ? "bg-blue-50 text-blue-800 font-bold border border-blue-200"
-                            : "text-gray-600 hover:bg-gray-50 border border-transparent"
+                            ? "bg-indigo-50 border-indigo-200 shadow-sm"
+                            : "bg-gray-50 border-gray-100 hover:bg-gray-100"
                         }`}
                       >
-                        {renderMyAvatar("sm")} {/* SỬ DỤNG HELPER AVATAR */}
-                        <span className="truncate">Tôi</span>
-                        {form.sharedWith.includes(user.uid) && (
-                          <div className="ml-auto text-blue-600">
-                            <Check size={16} />
-                          </div>
-                        )}
+                        {renderMyAvatar("md")}
+                        <span
+                          className={`font-bold ${
+                            form.sharedWith.includes(user.uid)
+                              ? "text-rose-700"
+                              : "text-gray-600"
+                          }`}
+                        >
+                          Tôi
+                        </span>
+                        <div className="ml-auto">
+                          {form.sharedWith.includes(user.uid) ? (
+                            <CheckCircle2
+                              className="text-indigo-500"
+                              size={24}
+                            />
+                          ) : (
+                            <Circle className="text-gray-300" size={24} />
+                          )}
+                        </div>
                       </button>
                     )}
-
-                    {/* B. Các bạn bè (ẨN NẾU LÀ NGƯỜI TRẢ) */}
                     {people
                       .filter(
-                        (p) => p.id !== user?.uid && p.id !== form.payerId, // <--- LỌC NGƯỜI TRẢ
+                        (p) => p.id !== user?.uid && p.id !== form.payerId,
                       )
                       .map((p) => {
                         const isSelected = form.sharedWith.includes(p.id);
@@ -812,46 +1167,52 @@ const ExpenseModal = ({
                           <button
                             key={p.id}
                             onClick={() => togglePerson(p.id)}
-                            className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all ${
+                            className={`w-full p-3.5 rounded-2xl flex items-center gap-4 transition-all border ${
                               isSelected
-                                ? "bg-blue-50 text-blue-800 font-bold border border-blue-200"
-                                : "text-gray-600 hover:bg-gray-50 border border-transparent"
+                                ? "bg-indigo-50 border-indigo-200 shadow-sm"
+                                : "bg-gray-50 border-gray-100 hover:bg-gray-100"
                             }`}
                           >
-                            <Avatar name={p.name} size="xs" />
-                            <span className="truncate">{p.name}</span>
-                            {isSelected && (
-                              <div className="ml-auto text-blue-600">
-                                <Check size={16} />
-                              </div>
-                            )}
+                            <Avatar name={p.name} src={p.photoURL} size="md" />
+                            <span
+                              className={`font-bold truncate ${
+                                isSelected ? "text-rose-700" : "text-gray-600"
+                              }`}
+                            >
+                              {p.name}
+                            </span>
+                            <div className="ml-auto">
+                              {isSelected ? (
+                                <CheckCircle2
+                                  className="text-indigo-500"
+                                  size={24}
+                                />
+                              ) : (
+                                <Circle className="text-gray-300" size={24} />
+                              )}
+                            </div>
                           </button>
                         );
                       })}
-                    <p className="text-xs text-center text-gray-400 italic mt-2">
-                      Người trả tiền ({getPayerName()}) mặc định được tính 1
-                      phần.
-                    </p>
-                  </>
+                  </div>
                 )}
 
-                {/* ================= CASE 3: ỨNG / VAY (FULL) ================= */}
+                {/* ====== CASE 3: FULL ====== */}
                 {form.type === "full" && (
-                  <div className="space-y-4">
-                    {/* Toggle Button: Tôi cho vay / Tôi đi vay */}
-                    <div className="flex bg-gray-100 p-1 rounded-xl">
+                  <div className="space-y-5">
+                    <div className="flex bg-gray-100 p-1.5 rounded-2xl relative">
                       <button
                         onClick={() =>
                           setForm({
                             ...form,
                             loanType: "lend",
                             payerId: user.uid,
-                            sharedWith: [], // Reset người vay
+                            sharedWith: [],
                           })
                         }
-                        className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${
+                        className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all z-10 ${
                           form.loanType === "lend"
-                            ? "bg-white shadow text-blue-600"
+                            ? "bg-white shadow-sm text-indigo-600"
                             : "text-gray-500"
                         }`}
                       >
@@ -862,13 +1223,13 @@ const ExpenseModal = ({
                           setForm({
                             ...form,
                             loanType: "borrow",
-                            payerId: "", // Reset người cho vay
-                            sharedWith: [user.uid], // Mặc định người hưởng là Tôi
+                            payerId: "",
+                            sharedWith: [user.uid],
                           })
                         }
-                        className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${
+                        className={`flex-1 py-3 rounded-xl text-sm font-bold transition-all z-10 ${
                           form.loanType === "borrow"
-                            ? "bg-white shadow text-purple-600"
+                            ? "bg-white shadow-sm text-violet-600"
                             : "text-gray-500"
                         }`}
                       >
@@ -877,12 +1238,11 @@ const ExpenseModal = ({
                     </div>
 
                     <div className="space-y-2">
-                      <p className="text-xs text-center text-gray-400 italic">
+                      <p className="text-[11px] font-bold text-gray-400 uppercase tracking-widest text-center mb-3">
                         {form.loanType === "lend"
-                          ? "Chọn DUY NHẤT 1 người vay tiền bạn"
-                          : "Chọn DUY NHẤT 1 người bạn mượn tiền"}
+                          ? "Ai mượn tiền bạn?"
+                          : "Bạn mượn của ai?"}
                       </p>
-
                       {people
                         .filter((p) => p.id !== user?.uid)
                         .map((p) => {
@@ -890,50 +1250,58 @@ const ExpenseModal = ({
                             form.loanType === "lend"
                               ? form.sharedWith.includes(p.id)
                               : form.payerId === p.id;
-
                           return (
                             <button
                               key={p.id}
                               onClick={() => {
-                                if (form.loanType === "lend") {
-                                  // Tôi cho vay -> Set sharedWith = [1 người]
+                                if (form.loanType === "lend")
                                   setForm({
                                     ...form,
                                     payerId: user.uid,
                                     sharedWith: [p.id],
                                   });
-                                } else {
-                                  // Tôi đi vay -> Set payerId = người đó
+                                else
                                   setForm({
                                     ...form,
                                     payerId: p.id,
                                     sharedWith: [user.uid],
                                   });
-                                }
                               }}
-                              className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all border ${
+                              className={`w-full p-3.5 rounded-2xl flex items-center gap-4 transition-all border ${
                                 isSelected
                                   ? form.loanType === "lend"
-                                    ? "bg-blue-50 text-blue-800 border-blue-200"
-                                    : "bg-purple-50 text-purple-800 border-purple-200"
-                                  : "text-gray-600 hover:bg-gray-50 border-transparent"
+                                    ? "bg-indigo-50 border-indigo-200"
+                                    : "bg-fuchsia-50 border-fuchsia-200"
+                                  : "bg-gray-50 border-gray-100 hover:bg-gray-100"
                               }`}
                             >
-                              <Avatar name={p.name} size="xs" />
-                              <span className="truncate">{p.name}</span>
-
-                              {/* Radio Indicator */}
+                              <Avatar
+                                name={p.name}
+                                src={p.photoURL}
+                                size="md"
+                              />
+                              <span
+                                className={`font-bold truncate ${
+                                  isSelected
+                                    ? form.loanType === "lend"
+                                      ? "text-rose-700"
+                                      : "text-indigo-700"
+                                    : "text-gray-600"
+                                }`}
+                              >
+                                {p.name}
+                              </span>
                               <div className="ml-auto">
                                 {isSelected ? (
                                   <div
-                                    className={`w-5 h-5 rounded-full border-[5px] ${
+                                    className={`w-6 h-6 rounded-full border-[6px] ${
                                       form.loanType === "lend"
-                                        ? "border-blue-600"
-                                        : "border-purple-600"
+                                        ? "border-rose-500"
+                                        : "border-fuchsia-500"
                                     }`}
                                   ></div>
                                 ) : (
-                                  <div className="w-5 h-5 rounded-full border-2 border-gray-300"></div>
+                                  <div className="w-6 h-6 rounded-full border-2 border-gray-300"></div>
                                 )}
                               </div>
                             </button>
@@ -943,157 +1311,158 @@ const ExpenseModal = ({
                   </div>
                 )}
               </div>
-            </div>
 
-            {/* 4. ẢNH HÓA ĐƠN */}
-            <div className="bg-white rounded-2xl p-4 shadow-sm">
-              <div className="flex justify-between items-center mb-2">
-                <span className="font-bold text-gray-500 text-sm">
-                  Ảnh hóa đơn
-                </span>
-                <label className="flex items-center gap-2 text-blue-600 font-bold text-sm cursor-pointer bg-blue-50 px-3 py-1.5 rounded-lg hover:bg-blue-100 transition-colors">
-                  <Camera size={16} />
-                  {uploading ? "Đang tải..." : "Chụp/Tải lên"}
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="hidden"
-                    onChange={handleImageUpload}
-                    disabled={uploading}
-                  />
-                </label>
+              {/* --- 6. Hình ảnh Hóa đơn --- */}
+              <div className="bg-white border border-gray-100 rounded-[2rem] p-4 shadow-sm">
+                <div className="flex justify-between items-center mb-3">
+                  <span className="font-bold text-gray-500 text-sm">
+                    Hóa đơn đính kèm
+                  </span>
+                  <label className="flex items-center gap-1.5 text-indigo-500 font-bold text-xs cursor-pointer bg-indigo-50 px-3 py-1.5 rounded-xl hover:bg-rose-100 transition-colors">
+                    <Camera size={16} />
+                    {uploading ? "Đang tải..." : "Thêm ảnh"}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={handleImageUpload}
+                      disabled={uploading}
+                    />
+                  </label>
+                </div>
+
+                {form.billImage ? (
+                  <div className="relative group mt-2">
+                    <img
+                      src={form.billImage}
+                      alt="Bill"
+                      className="w-full h-48 object-cover rounded-2xl border border-gray-200 shadow-sm"
+                    />
+                    <button
+                      onClick={() => setForm({ ...form, billImage: null })}
+                      className="absolute top-3 right-3 bg-black/50 backdrop-blur-md text-white p-2 rounded-full hover:bg-red-500 transition-colors shadow-sm"
+                    >
+                      <X size={16} strokeWidth={3} />
+                    </button>
+                  </div>
+                ) : (
+                  <div className="h-20 border-2 border-dashed border-gray-200 rounded-2xl flex items-center justify-center text-gray-400 text-sm bg-gray-50/50 mt-2">
+                    <ImageIcon size={20} className="mr-2 opacity-50" />
+                    Chưa có ảnh nào
+                  </div>
+                )}
               </div>
 
-              {form.billImage ? (
-                <div className="relative group">
-                  <img
-                    src={form.billImage}
-                    alt="Bill"
-                    className="w-full h-48 object-cover rounded-xl border border-gray-200"
+              {/* --- 7. Bình luận --- */}
+              <div className="bg-white border border-gray-100 rounded-[2rem] p-4 shadow-sm mb-6">
+                <span className="font-bold text-gray-500 text-sm flex items-center gap-2 mb-4">
+                  <MessageSquare size={16} /> Bình luận ({form.comments.length})
+                </span>
+
+                {form.comments.length > 0 && (
+                  <div className="max-h-40 overflow-y-auto space-y-3 custom-scrollbar mb-4">
+                    {form.comments.map((cmt, index) => (
+                      <div
+                        key={cmt.id || index}
+                        className="bg-gray-50 p-3.5 rounded-2xl text-sm border border-gray-100"
+                      >
+                        <div className="flex justify-between items-start">
+                          <span className="font-bold text-gray-800">
+                            {cmt.userName}
+                          </span>
+                          <span className="text-[10px] text-gray-400 font-medium">
+                            {cmt.timestamp
+                              ? format(new Date(cmt.timestamp), "dd/MM HH:mm")
+                              : ""}
+                          </span>
+                        </div>
+                        <p className="text-gray-600 mt-1.5 break-words font-medium">
+                          {cmt.text}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="flex gap-2 mt-4">
+                  <input
+                    type="text"
+                    placeholder="Viết gì đó..."
+                    className="flex-1 bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-sm outline-none focus:ring-2 focus:ring-indigo-200 font-medium"
+                    value={commentText}
+                    onChange={(e) => setCommentText(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAddComment()}
                   />
+                  {/* Trở lại dùng Padding (p-3.5) như code gốc để nút tự cân bằng tâm */}
                   <button
-                    onClick={() => setForm({ ...form, billImage: null })}
-                    className="absolute top-2 right-2 bg-black/50 text-white p-1.5 rounded-full hover:bg-red-500 transition-colors shadow-sm"
+                    onClick={handleAddComment}
+                    className="p-3.5 bg-indigo-500 text-white rounded-2xl hover:bg-rose-600 shadow-sm active:scale-95 transition-all flex items-center justify-center"
                   >
-                    <X size={16} />
+                    <Send size={20} />
                   </button>
                 </div>
-              ) : (
-                <div className="h-20 border-2 border-dashed border-gray-200 rounded-xl flex items-center justify-center text-gray-400 text-sm bg-gray-50/50">
-                  <ImageIcon size={20} className="mr-2 opacity-50" />
-                  Chưa có ảnh
-                </div>
-              )}
-            </div>
-
-            {/* 5. BÌNH LUẬN */}
-            <div className="bg-white rounded-2xl p-4 shadow-sm space-y-3">
-              <span className="font-bold text-gray-500 text-sm flex items-center gap-2">
-                <MessageSquare size={16} /> Bình luận ({form.comments.length})
-              </span>
-
-              {/* List Comments */}
-              {form.comments.length > 0 && (
-                <div className="max-h-40 overflow-y-auto space-y-3 custom-scrollbar p-1">
-                  {/* SỬA: Thêm tham số index vào hàm map */}
-                  {form.comments.map((cmt, index) => (
-                    <div
-                      /* SỬA: Dùng id, nếu không có thì dùng index để đảm bảo không lỗi */
-                      key={cmt.id || index}
-                      className="bg-gray-50 p-3 rounded-xl text-sm"
-                    >
-                      <div className="flex justify-between items-start">
-                        <span className="font-bold text-gray-800">
-                          {cmt.userName}
-                        </span>
-                        <span className="text-[10px] text-gray-400">
-                          {/* Thêm kiểm tra timestamp tồn tại trước khi format để tránh lỗi Invalid Date */}
-                          {cmt.timestamp
-                            ? format(new Date(cmt.timestamp), "dd/MM HH:mm")
-                            : ""}
-                        </span>
-                      </div>
-                      <p className="text-gray-600 mt-1 break-words">
-                        {cmt.text}
-                      </p>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Input Comment */}
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  placeholder="Viết bình luận..."
-                  className="flex-1 bg-gray-50 border-none rounded-xl px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-100 transition-all"
-                  value={commentText}
-                  onChange={(e) => setCommentText(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleAddComment()}
-                />
-                <button
-                  onClick={handleAddComment}
-                  className="p-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-colors"
-                >
-                  <Send size={16} />
-                </button>
               </div>
             </div>
           </div>
-        </div>
 
-        {/* === PAYER SELECT VIEW (OVERLAY) === */}
-        <div
-          className={`absolute inset-0 bg-gray-100 flex flex-col transition-transform duration-300 ease-in-out ${
-            currentView === "payer_select"
-              ? "translate-x-0"
-              : "translate-x-full"
-          }`}
-        >
-          <div className="px-4 py-4 bg-white border-b flex items-center shrink-0 relative">
-            <button
-              onClick={() => setCurrentView("form")}
-              className="absolute left-4 p-2 -ml-2 text-gray-500 hover:bg-gray-100 rounded-full"
-            >
-              <ChevronLeft size={24} />
-            </button>
-            <h2 className="font-bold text-lg text-gray-800 w-full text-center">
-              Chọn người trả tiền
-            </h2>
-          </div>
+          {/* ======================================================= */}
+          {/* MÀN HÌNH 2: CHỌN NGƯỜI TRẢ TIỀN (TRƯỢT TỪ PHẢI QUA)      */}
+          {/* ======================================================= */}
+          <div
+            className={`absolute inset-0 w-full h-full bg-gray-50 flex flex-col transition-transform duration-300 ease-in-out ${
+              currentView === "payer_select"
+                ? "translate-x-0"
+                : "translate-x-full"
+            }`}
+          >
+            <div className="px-4 py-4 bg-white shadow-sm flex items-center shrink-0 relative z-10 rounded-t-[2.5rem] md:rounded-t-none">
+              <button
+                onClick={() => setCurrentView("form")}
+                className="absolute left-4 p-2.5 text-gray-500 hover:bg-indigo-50 hover:text-indigo-500 rounded-full transition-colors"
+              >
+                <ChevronLeft size={24} />
+              </button>
+              <h2 className="font-black text-lg text-gray-800 w-full text-center mt-2 md:mt-0">
+                Chọn người trả tiền
+              </h2>
+            </div>
 
-          <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-            <div className="bg-white rounded-2xl overflow-hidden shadow-sm">
-              {/* --- OPTION 1: TÔI --- */}
+            <div className="flex-1 overflow-y-auto p-4 pt-6 custom-scrollbar space-y-3 pb-[100px]">
+              {/* Option: TÔI */}
               <div
                 onClick={() => {
                   setForm({ ...form, payerId: "me" });
                   setCurrentView("form");
                 }}
-                className={`flex items-center justify-between p-4 border-b border-gray-100 cursor-pointer active:bg-gray-50 ${
-                  form.payerId === "me" ? "bg-yellow-50" : ""
+                className={`flex items-center justify-between p-4 rounded-2xl cursor-pointer active:scale-95 transition-all border ${
+                  form.payerId === "me"
+                    ? "bg-indigo-50 border-indigo-200 shadow-sm"
+                    : "bg-white border-gray-100 hover:shadow-md"
                 }`}
               >
-                <div className="flex items-center gap-3">
-                  {renderMyAvatar("md")} {/* SỬ DỤNG HELPER AVATAR */}
-                  <span className="font-bold text-gray-800">
+                <div className="flex items-center gap-4">
+                  {renderMyAvatar("md")}
+                  <span
+                    className={`font-bold text-lg ${
+                      form.payerId === "me"
+                        ? "text-indigo-600"
+                        : "text-gray-800"
+                    }`}
+                  >
                     Tôi (Mặc định)
                   </span>
                 </div>
                 {form.payerId === "me" ? (
-                  <CheckCircle2
-                    className="text-yellow-500 fill-current"
-                    size={24}
-                  />
+                  <CheckCircle2 className="text-indigo-500" size={28} />
                 ) : (
-                  <Circle className="text-gray-300" size={24} />
+                  <Circle className="text-gray-300" size={28} />
                 )}
               </div>
 
-              {/* --- OPTION 2: DANH SÁCH BẠN BÈ --- */}
+              {/* Option: BẠN BÈ */}
               {people
                 .filter((p) => p.id !== user?.uid)
-                .map((p, index) => {
+                .map((p) => {
                   const isSelected = form.payerId === p.id;
                   return (
                     <div
@@ -1102,23 +1471,34 @@ const ExpenseModal = ({
                         setForm({ ...form, payerId: p.id });
                         setCurrentView("form");
                       }}
-                      className={`flex items-center justify-between p-4 border-gray-100 cursor-pointer active:bg-gray-50 ${
-                        index !== people.length - 1 ? "border-b" : ""
-                      } ${isSelected ? "bg-yellow-50" : ""}`}
+                      className={`flex items-center justify-between p-4 rounded-2xl cursor-pointer active:scale-95 transition-all border ${
+                        isSelected
+                          ? "bg-indigo-50 border-indigo-200 shadow-sm"
+                          : "bg-white border-gray-100 hover:shadow-md"
+                      }`}
                     >
-                      <div className="flex items-center gap-3">
-                        <Avatar name={p.name} size="md" />
-                        <span className="font-bold text-gray-800">
+                      <div className="flex items-center gap-4">
+                        {p.photoURL ? (
+                          <img
+                            src={p.photoURL}
+                            alt={p.name}
+                            className="w-10 h-10 rounded-full object-cover shadow-sm border-2 border-white shrink-0"
+                          />
+                        ) : (
+                          <Avatar name={p.name} src={p.photoURL} size="md" />
+                        )}
+                        <span
+                          className={`font-bold text-lg ${
+                            isSelected ? "text-indigo-600" : "text-gray-800"
+                          }`}
+                        >
                           {p.name}
                         </span>
                       </div>
                       {isSelected ? (
-                        <CheckCircle2
-                          className="text-yellow-500 fill-current"
-                          size={24}
-                        />
+                        <CheckCircle2 className="text-indigo-500" size={28} />
                       ) : (
-                        <Circle className="text-gray-300" size={24} />
+                        <Circle className="text-gray-300" size={28} />
                       )}
                     </div>
                   );
@@ -1126,7 +1506,20 @@ const ExpenseModal = ({
             </div>
           </div>
         </div>
-      </div>
+
+        {/* ======================================================= */}
+        {/* FOOTER CỐ ĐỊNH CHỨA NÚT LƯU CỰC TO                       */}
+        {/* ======================================================= */}
+        <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-100/50 bg-white/80 backdrop-blur-xl pb-[calc(1rem+env(safe-area-inset-bottom))] z-50">
+          <button
+            onClick={handleSave}
+            className="w-full py-4 bg-gradient-to-r from-indigo-500 to-violet-500 text-white rounded-2xl font-black text-lg shadow-lg shadow-indigo-200 hover:shadow-[0_12px_30px_rgba(244,114,182,0.5)] active:scale-95 transition-all flex items-center justify-center gap-2"
+          >
+            <Check size={24} strokeWidth={3} />
+            <span>Lưu Giao Dịch</span>
+          </button>
+        </div>
+      </motion.div>
     </div>
   );
 };
@@ -1343,7 +1736,7 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 transition-colors flex items-center justify-center p-1"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-indigo-600 transition-colors flex items-center justify-center p-1"
               >
                 {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
               </button>
@@ -1360,7 +1753,7 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-blue-200 flex items-center justify-center gap-2 transition-all"
+            className="w-full py-3 bg-indigo-500 text-white rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-indigo-200/50 flex items-center justify-center gap-2 transition-all"
           >
             {isLoading ? (
               <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -1382,7 +1775,7 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
                 setIsForgotPassword(true);
                 setError("");
               }}
-              className="text-gray-500 hover:text-blue-600 underline block w-full mb-2"
+              className="text-gray-500 hover:text-indigo-600 underline block w-full mb-2"
             >
               Quên mật khẩu?
             </button>
@@ -1400,7 +1793,7 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
                 else setIsRegistering(!isRegistering);
                 setError("");
               }}
-              className="text-blue-600 font-bold hover:underline"
+              className="text-indigo-600 font-bold hover:underline"
             >
               {isForgotPassword
                 ? "Đăng nhập"
@@ -1445,14 +1838,56 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
 
     setUploading(true);
     try {
+      // 1. Tải ảnh lên Storage
       const storageRef = ref(storage, `profile_pictures/${user.uid}`);
       await uploadBytes(storageRef, file);
       const url = await getDownloadURL(storageRef);
+
+      // 2. Cập nhật vào hệ thống Auth
       await updateProfile(user, { photoURL: url });
-      showToast("Đã cập nhật ảnh đại diện!", "success");
+
+      // ==========================================
+      // 3. [CODE MỚI] LƯU ẢNH VÀO FIRESTORE ĐỂ BẠN BÈ THẤY
+      // ==========================================
+      const userRef = doc(db, "users", user.uid);
+      await setDoc(userRef, { photoURL: url }, { merge: true });
+
+      // ==========================================
+      // 4. [CODE MỚI] ĐỔI ẢNH HÀNG LOẠT TRONG CÁC NHÓM ĐANG THAM GIA
+      // ==========================================
+      const userDoc = await getDoc(userRef);
+      if (userDoc.exists()) {
+        const joinedGroups = userDoc.data().joinedGroups || [];
+
+        // Quét qua tất cả các nhóm mình có mặt
+        for (const g of joinedGroups) {
+          const groupRef = doc(db, "groups", g.id);
+          const groupSnap = await getDoc(groupRef);
+
+          if (groupSnap.exists()) {
+            const gData = groupSnap.data();
+            let updatedMembers = gData.members || [];
+
+            // Tìm tên mình trong nhóm và cập nhật lại link ảnh mới
+            updatedMembers = updatedMembers.map((m) =>
+              m.id === user.uid ? { ...m, photoURL: url } : m,
+            );
+
+            // Lưu lại vào nhóm
+            await updateDoc(groupRef, { members: updatedMembers });
+          }
+        }
+      }
+
+      showToast("Đã cập nhật ảnh đại diện thành công!", "success");
+
+      // [QUAN TRỌNG]: Tự động tải lại trang để Firebase Auth làm mới dữ liệu ảnh toàn App
+      setTimeout(() => {
+        window.location.reload();
+      }, 1500);
     } catch (error) {
       console.error(error);
-      showToast("Lỗi cập nhật ảnh", "error");
+      showToast("Lỗi cập nhật ảnh: " + error.message, "error");
     } finally {
       setUploading(false);
     }
@@ -1520,7 +1955,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
         onClick={(e) => e.stopPropagation()}
       >
         {/* HEADER */}
-        <div className="bg-gradient-to-br from-blue-600 to-indigo-700 p-6 text-white text-center relative">
+        <div className="bg-gradient-to-br from-indigo-600 to-violet-500 p-6 text-white text-center relative">
           <button
             onClick={onClose}
             className="absolute top-12 md:top-4 right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-all shadow-sm"
@@ -1537,7 +1972,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
                   className="w-full h-full rounded-full object-cover"
                 />
               ) : (
-                <div className="w-full h-full rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-3xl">
+                <div className="w-full h-full rounded-full bg-violet-100 flex items-center justify-center text-indigo-600 font-bold text-3xl">
                   {user.email?.charAt(0).toUpperCase()}
                 </div>
               )}
@@ -1591,7 +2026,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
                   <button
                     type="button"
                     onClick={() => setShowCurrentPass(!showCurrentPass)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-1"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-indigo-600 p-1"
                   >
                     {showCurrentPass ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
@@ -1615,7 +2050,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
                   <button
                     type="button"
                     onClick={() => setShowNewPass(!showNewPass)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600 p-1"
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-indigo-600 p-1"
                   >
                     {showNewPass ? <EyeOff size={16} /> : <Eye size={16} />}
                   </button>
@@ -1633,7 +2068,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
                 <button
                   onClick={handleChangePassword}
                   disabled={passLoading}
-                  className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-bold hover:bg-blue-700 flex justify-center items-center shadow-lg shadow-blue-200"
+                  className="flex-1 py-2 bg-indigo-500 text-white rounded-lg text-sm font-bold hover:bg-blue-700 flex justify-center items-center shadow-lg shadow-indigo-200/50"
                 >
                   {passLoading ? (
                     <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -1646,7 +2081,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
           ) : (
             <button
               onClick={() => setIsChangePassMode(true)}
-              className="w-full py-3 rounded-xl bg-blue-50 text-blue-600 font-bold border border-blue-100 hover:bg-blue-100 transition-all flex items-center justify-center gap-2"
+              className="w-full py-3 rounded-xl bg-violet-50/50 text-indigo-600 font-bold border border-blue-100 hover:bg-violet-100 transition-all flex items-center justify-center gap-2"
             >
               <Lock size={18} /> Đổi mật khẩu
             </button>
@@ -1723,7 +2158,7 @@ const EditContactModal = ({ contact, onClose, onSave }) => {
           </button>
           <button
             onClick={() => onSave(name, email)}
-            className="flex-1 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-colors"
+            className="flex-1 py-3 bg-indigo-500 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-indigo-200/50 transition-colors"
           >
             Lưu
           </button>
@@ -1788,8 +2223,12 @@ const HistoryItem = ({
     .join(", ");
 
   return (
-    <div
-      className="relative mb-3 overflow-hidden rounded-2xl"
+    <motion.div
+      initial={{ opacity: 0, y: 15, scale: 0.98 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: "spring", stiffness: 300, damping: 24 }}
+      // THÊM 'isolate' VÀ BỎ 'overflow-hidden'
+      className="relative mb-4 rounded-[1.5rem] isolate"
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -1797,7 +2236,10 @@ const HistoryItem = ({
       {/* NÚT XÓA ẨN BÊN DƯỚI (Chỉ hiện khi vuốt trên Mobile) */}
       {isMobile && (
         <div
-          className="absolute inset-0 bg-red-500 flex justify-end items-center pr-6 text-white active:bg-red-700 transition-colors"
+          // THU NHỎ LẠI W-1/2, BO GÓC BÊN PHẢI, ẨN KHI CHƯA VUỐT BẰNG OPACITY
+          className={`absolute inset-y-0 right-0 w-1/2 bg-red-500 rounded-r-[1.5rem] flex justify-end items-center pr-6 text-white active:bg-red-700 transition-opacity duration-200 ${
+            isSwiped ? "opacity-100" : "opacity-0 pointer-events-none"
+          }`}
           onClick={(e) => {
             e.stopPropagation();
             setItemToDelete({ id: exp.id, groupId: exp.groupId });
@@ -1811,62 +2253,91 @@ const HistoryItem = ({
         </div>
       )}
 
-      {/* NỘI DUNG GIAO DỊCH */}
+      {/* NỘI DUNG GIAO DỊCH (CARD) */}
       <div
         onClick={() => !isSwiped && openEditModal(exp)}
-        className={`group bg-white rounded-2xl border border-gray-100 shadow-sm relative overflow-hidden flex items-center p-4 transition-transform duration-300 ease-out ${
-          isMobile
-            ? "mx-0 border-transparent"
-            : "hover:shadow-md hover:bg-gray-50 cursor-pointer"
+        // BỎ border-white TRÊN MOBILE, TRỞ VỀ CÁCH HIỂN THỊ VIỀN XÁM MƯỢT
+        className={`group bg-white rounded-[1.5rem] border border-gray-100 shadow-sm relative flex items-center p-4 transition-transform duration-300 ease-out ${
+          !isMobile && "hover:shadow-md hover:bg-indigo-50/30 cursor-pointer"
         } ${isSwiped ? "-translate-x-20" : "translate-x-0"}`}
       >
+        {/* ICON TO, BO TRÒN BÊN TRÁI (Thay cho thanh màu dọc cũ) */}
         <div
-          className={`w-1.5 bg-gradient-to-b absolute left-0 top-0 bottom-0 ${
+          className={`w-14 h-14 rounded-2xl flex items-center justify-center text-2xl shrink-0 shadow-inner mr-4 ${
             exp.type === "split"
-              ? "from-blue-400 to-blue-600"
-              : "from-orange-400 to-orange-600"
+              ? "bg-indigo-100/50 text-indigo-600"
+              : "bg-emerald-100/50 text-emerald-600"
           }`}
-        ></div>
+        >
+          {exp.type === "split" ? "🛍️" : "💸"}
+        </div>
 
-        <div className="ml-4 flex-1">
+        <div className="flex-1 min-w-0">
           <div className="flex justify-between items-start mb-1">
-            <div className="flex items-center gap-2">
-              <span className="font-bold text-gray-800 text-sm md:text-lg line-clamp-1">
+            <div className="flex items-center gap-2 pr-2 overflow-hidden">
+              <span className="font-bold text-gray-800 text-base md:text-lg truncate">
                 {exp.description}
               </span>
               {exp.groupName && (
-                <span className="text-[10px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full border border-gray-200">
+                <span className="text-[10px] bg-gray-50 text-gray-400 px-2 py-0.5 rounded-full border border-gray-100 shrink-0 font-medium">
                   {exp.groupName}
                 </span>
               )}
             </div>
             <span
-              className={`font-bold text-base md:text-xl shrink-0 ${
-                exp.type === "split" ? "text-blue-600" : "text-orange-600"
+              className={`font-black text-base md:text-xl shrink-0 ${
+                exp.type === "split" ? "text-indigo-600" : "text-orange-500"
               }`}
             >
               {formatCompactCurrency(exp.amount)}
             </span>
           </div>
 
-          <div className="flex justify-between items-end">
-            <div className="text-xs md:text-base text-gray-400 w-full">
-              <p>
-                <span className="font-medium text-gray-600">{payerName}</span>{" "}
-                trả • {format(new Date(exp.date), "dd/MM")}
-              </p>
-              <div className="text-gray-400 truncate max-w-[200px] md:max-w-full mt-1 mb-2">
-                Với: {names}
+          <div className="text-xs md:text-sm text-gray-400 mb-3">
+            <span className="font-semibold text-gray-600">{payerName}</span> trả
+            • {format(new Date(exp.date), "dd/MM")}
+          </div>
+
+          <div className="flex flex-col gap-3">
+            {/* AVATAR XẾP CHỒNG (Thay cho dòng chữ "Với: Sơn, Hà...") */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] font-bold text-gray-300 uppercase tracking-wider">
+                  Cùng với
+                </span>
+                <div className="flex -space-x-2">
+                  {exp.sharedWith.slice(0, 4).map((id) => {
+                    const p = currentContextPeople?.find(
+                      (person) => person.id === id,
+                    );
+                    if (!p) return null;
+                    return (
+                      <Avatar
+                        key={id}
+                        name={p.name}
+                        src={p.photoURL} // <--- THÊM DÒNG NÀY ĐỂ ĐỒNG BỘ ẢNH THẬT
+                        size="xs"
+                        className="border-2 border-white shadow-sm"
+                      />
+                    );
+                  })}
+                  {exp.sharedWith.length > 4 && (
+                    <div className="w-6 h-6 rounded-full bg-gray-100 border-2 border-white flex items-center justify-center text-[9px] font-bold text-gray-500 z-10 shadow-sm">
+                      +{exp.sharedWith.length - 4}
+                    </div>
+                  )}
+                </div>
               </div>
 
-              <div className="flex gap-3 mb-2">
+              {/* NÚT HÓA ĐƠN & BÌNH LUẬN (Nhỏ gọn, dạng bong bóng) */}
+              <div className="flex gap-2">
                 {exp.billImage && (
                   <div
                     onClick={(e) => {
                       e.stopPropagation();
                       setViewingImage(exp.billImage);
                     }}
-                    className="flex items-center gap-1 text-[10px] bg-blue-50 text-blue-600 px-2 py-0.5 rounded-full font-bold border border-blue-100 cursor-pointer"
+                    className="flex items-center gap-1.5 bg-violet-50 text-pink-500 px-2.5 py-1 rounded-full text-[10px] font-bold shadow-sm"
                   >
                     <ImageIcon size={12} />
                     <span>Hóa đơn</span>
@@ -1877,75 +2348,81 @@ const HistoryItem = ({
                     e.stopPropagation();
                     setCommentModalData(exp);
                   }}
-                  className="flex items-center gap-1 text-[10px] bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full font-bold border border-gray-200 cursor-pointer"
+                  className="flex items-center gap-1.5 bg-gray-50 text-gray-500 px-2.5 py-1 rounded-full text-[10px] font-bold shadow-sm relative"
                 >
                   <MessageSquare size={12} />
-                  <span>{exp.comments?.length || 0} bình luận</span>
+                  <span>{exp.comments?.length || 0}</span>
+                  {exp.comments?.length > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-indigo-500 rounded-full border-2 border-white"></span>
+                  )}
                 </div>
               </div>
-
-              {groupId && (
-                <div className="flex flex-wrap gap-2 mt-1">
-                  {exp.sharedWith.map((id) => {
-                    const p = currentContextPeople.find(
-                      (person) => person.id === id,
-                    );
-                    if (!p) return null;
-                    const isSettled = exp.settledBy?.includes(id);
-                    return (
-                      <button
-                        key={id}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          toggleSettled(exp.id, id);
-                        }}
-                        className={`text-[10px] px-2.5 py-1 rounded-full border flex items-center gap-1.5 transition-all font-bold ${
-                          isSettled
-                            ? "bg-green-100 border-green-200 text-green-700"
-                            : "bg-gray-50 border-gray-200 text-gray-400"
-                        }`}
-                      >
-                        {isSettled ? (
-                          <CheckCircle2 size={12} strokeWidth={3} />
-                        ) : (
-                          <Circle size={12} />
-                        )}
-                        {p.name}
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
             </div>
-            {!isMobile && groupId && (
-              <div
-                className="flex gap-2 ml-4 shrink-0 hidden md:flex opacity-0 group-hover:opacity-100"
-                onClick={(e) => e.stopPropagation()}
-              >
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    openEditModal(exp);
-                  }}
-                  className="text-gray-400 hover:text-blue-500 bg-gray-50 p-2 rounded-lg border border-gray-100"
-                >
-                  <Edit2 size={18} />
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setItemToDelete({ id: exp.id, groupId: exp.groupId });
-                  }}
-                  className="text-gray-400 hover:text-red-500 bg-gray-50 p-2 rounded-lg border border-gray-100"
-                >
-                  <Trash2 size={18} />
-                </button>
+
+            {/* CHECKBOX XÁC NHẬN ĐÃ TRẢ TIỀN */}
+            {groupId && (
+              <div className="flex flex-wrap gap-2 pt-2 border-t border-gray-50">
+                {exp.sharedWith.map((id) => {
+                  const p = currentContextPeople.find(
+                    (person) => person.id === id,
+                  );
+                  if (!p) return null;
+                  const isSettled = exp.settledBy?.includes(id);
+                  return (
+                    <button
+                      key={id}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSettled(exp.id, id);
+                      }}
+                      className={`text-[10px] px-2.5 py-1 rounded-full border flex items-center gap-1.5 transition-all font-bold ${
+                        isSettled
+                          ? "bg-teal-50 border-teal-200 text-teal-600 shadow-sm"
+                          : "bg-gray-50 border-gray-200 text-gray-400 hover:bg-gray-100"
+                      }`}
+                    >
+                      {isSettled ? (
+                        <CheckCircle2 size={12} strokeWidth={3} />
+                      ) : (
+                        <Circle size={12} />
+                      )}
+                      {p.name}
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
+
+          {/* CÁC NÚT THAO TÁC TRÊN MÁY TÍNH / IPAD (Hiện khi trỏ chuột) */}
+          {!isMobile && groupId && (
+            <div
+              className="absolute top-4 right-4 flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openEditModal(exp);
+                }}
+                className="text-gray-400 hover:text-blue-500 bg-white p-2 rounded-xl shadow-sm border border-gray-100 hover:bg-blue-50 transition-colors"
+              >
+                <Edit2 size={16} />
+              </button>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setItemToDelete({ id: exp.id, groupId: exp.groupId });
+                }}
+                className="text-gray-400 hover:text-red-500 bg-white p-2 rounded-xl shadow-sm border border-gray-100 hover:bg-red-50 transition-colors"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          )}
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 };
 
@@ -1966,6 +2443,7 @@ export default function App() {
   const [itemToDelete, setItemToDelete] = useState(null);
   const [viewingImage, setViewingImage] = useState(null);
   const [contacts, setContacts] = useState([]);
+  const [friendRequests, setFriendRequests] = useState([]);
   const [user, setUser] = useState(null);
   const [globalFriendStats, setGlobalFriendStats] = useState([]);
   const [groupOwnerId, setGroupOwnerId] = useState(null);
@@ -1986,7 +2464,8 @@ export default function App() {
   const [myGroups, setMyGroups] = useState([]); // Danh sách nhóm của tôi
   const [isCreateGroupModalOpen, setIsCreateGroupModalOpen] = useState(false);
   const [newGroupName, setNewGroupName] = useState("");
-
+  const [isJoinModalOpen, setIsJoinModalOpen] = useState(false);
+  const [joinCodeInput, setJoinCodeInput] = useState("");
   const [commentModalData, setCommentModalData] = useState(null);
   // Thêm vào trong App
   const [tempMembers, setTempMembers] = useState([]); // Danh sách người chờ thêm khi tạo nhóm
@@ -2000,6 +2479,140 @@ export default function App() {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  // --- AUTO-FIX BUG "me": CHUYỂN ĐỔI CHỮ "me" THÀNH UID CỦA CHỦ NHÓM ---
+  useEffect(() => {
+    if (!groupId || !expenses.length || !groupOwnerId) return;
+
+    let needsUpdate = false;
+    const fixedExpenses = expenses.map((exp) => {
+      let newExp = { ...exp };
+      let modified = false;
+
+      // 1. Chuyển người trả tiền ("me") thành UID của trưởng nhóm
+      if (newExp.payerId === "me") {
+        newExp.payerId = groupOwnerId;
+        modified = true;
+      }
+
+      // 2. Chuyển "me" trong danh sách người tham gia
+      if (newExp.sharedWith?.includes("me")) {
+        newExp.sharedWith = [
+          ...new Set(
+            newExp.sharedWith.map((id) => (id === "me" ? groupOwnerId : id)),
+          ),
+        ];
+        modified = true;
+      }
+
+      // 3. Chuyển "me" trong danh sách người đã trả nợ
+      if (newExp.settledBy?.includes("me")) {
+        newExp.settledBy = [
+          ...new Set(
+            newExp.settledBy.map((id) => (id === "me" ? groupOwnerId : id)),
+          ),
+        ];
+        modified = true;
+      }
+
+      // 4. Chuyển "me" trong chia tiền chi tiết (Custom Shares)
+      if (newExp.customShares && newExp.customShares["me"] !== undefined) {
+        newExp.customShares[groupOwnerId] = newExp.customShares["me"];
+        delete newExp.customShares["me"];
+        modified = true;
+      }
+
+      if (modified) needsUpdate = true;
+      return newExp;
+    });
+
+    // Cập nhật lại toàn bộ lên Firebase
+    if (needsUpdate) {
+      updateDoc(doc(db, "groups", groupId), { expenses: fixedExpenses })
+        .then(() =>
+          showToast("Đã tự động sửa lỗi hiển thị sai công nợ!", "success"),
+        )
+        .catch((e) => console.error("Lỗi fix data:", e));
+    }
+  }, [expenses, groupId, groupOwnerId]);
+
+  // --- AUTO-MERGE: TỰ ĐỘNG GỘP THÀNH VIÊN TRÙNG LẶP TRONG NHÓM ---
+  useEffect(() => {
+    // Chỉ chạy khi đang ở trong nhóm và có dữ liệu
+    if (!groupId || !people || people.length === 0) return;
+
+    const emailMap = {};
+    let needsUpdate = false;
+    let newPeople = [...people];
+    let newExpenses = [...expenses];
+
+    people.forEach((p) => {
+      if (!p.email) return; // Nếu không có email thì bỏ qua
+
+      if (!emailMap[p.email]) {
+        emailMap[p.email] = p;
+      } else {
+        // PHÁT HIỆN TRÙNG EMAIL TRONG CÙNG 1 NHÓM!
+        needsUpdate = true;
+        const existing = emailMap[p.email];
+
+        // Xác định ai là tài khoản "Thật" (ưu tiên có Avatar hoặc ID dài hơn)
+        let realId, fakeId;
+        if (p.photoURL || p.id.length > existing.id.length) {
+          realId = p.id;
+          fakeId = existing.id;
+          emailMap[p.email] = p; // Cập nhật người "thật" vào danh sách chuẩn
+        } else {
+          realId = existing.id;
+          fakeId = p.id;
+        }
+
+        // 1. Gạch tên tài khoản ảo khỏi danh sách thành viên nhóm
+        newPeople = newPeople.filter((m) => m.id !== fakeId);
+
+        // 2. Chuyển toàn bộ tiền nợ, lịch sử chi tiêu từ ID ảo sang ID thật
+        newExpenses = newExpenses.map((exp) => {
+          let newExp = { ...exp };
+          if (newExp.payerId === fakeId) newExp.payerId = realId; // Đổi người trả
+
+          if (newExp.sharedWith?.includes(fakeId)) {
+            newExp.sharedWith = [
+              ...new Set(
+                newExp.sharedWith.map((id) => (id === fakeId ? realId : id)),
+              ),
+            ];
+          }
+          if (newExp.settledBy?.includes(fakeId)) {
+            newExp.settledBy = [
+              ...new Set(
+                newExp.settledBy.map((id) => (id === fakeId ? realId : id)),
+              ),
+            ];
+          }
+          if (
+            newExp.customShares &&
+            newExp.customShares[fakeId] !== undefined
+          ) {
+            newExp.customShares[realId] = newExp.customShares[fakeId];
+            delete newExp.customShares[fakeId];
+          }
+          return newExp;
+        });
+      }
+    });
+
+    // Nếu có gộp, lưu ngay lên Firebase
+    if (needsUpdate) {
+      updateDoc(doc(db, "groups", groupId), {
+        members: newPeople,
+        expenses: newExpenses,
+      })
+        .then(() => {
+          showToast("Hệ thống đã tự động gộp 2 tài khoản Thu Hà!", "success");
+        })
+        .catch((e) => console.error("Lỗi gộp:", e));
+    }
+  }, [people, expenses, groupId]);
 
   // --- THAY THẾ: LOGIC ĐỒNG BỘ REAL-TIME VỚI FIREBASE ---
   // Xóa hoặc comment lại các hàm fetchDataFromServer / saveDataToServer cũ
@@ -2163,9 +2776,11 @@ export default function App() {
             setGroupOwnerId(null);
           }
           showToast("Đã rời nhóm thành công", "success");
+          setConfirmDialog((prev) => ({ ...prev, isOpen: false })); // <--- THÊM DÒNG NÀY
         } catch (e) {
           console.error(e);
           showToast("Lỗi khi rời nhóm", "error");
+          setConfirmDialog((prev) => ({ ...prev, isOpen: false })); // <--- THÊM DÒNG NÀY
         }
       },
     });
@@ -2204,7 +2819,12 @@ export default function App() {
   // States cho thêm người (Có thêm email)
   const [newPersonName, setNewPersonName] = useState("");
   const [newPersonEmail, setNewPersonEmail] = useState(""); // <--- MỚI
-
+  // --- STATES CHO TÌM KIẾM & HỢP NHẤT TÀI KHOẢN ---
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [mergingContact, setMergingContact] = useState(null); // Lưu người ảo đang cần liên kết
+  const [newLocalContactName, setNewLocalContactName] = useState(""); // <--- CODE THÊM MỚI
   const [toast, setToast] = useState(null);
   const [confirmDialog, setConfirmDialog] = useState({
     isOpen: false,
@@ -2230,14 +2850,51 @@ export default function App() {
         // Lưu token này lên server nếu muốn nhận thông báo từ xa
       });
 
-      PushNotifications.addListener("registrationError", (error) => {
-        console.log("Error on registration: " + JSON.stringify(error));
+      // Tìm đoạn listener "registration" và sửa lại thế này:
+      PushNotifications.addListener("registration", async (token) => {
+        console.log("Thiết bị đã cấp Token:", token.value);
+
+        if (auth.currentUser) {
+          const uid = auth.currentUser.uid;
+
+          // 1. Cập nhật Firestore
+          await setDoc(
+            doc(db, "users", uid),
+            { fcmToken: token.value },
+            { merge: true },
+          );
+
+          // 2. [QUAN TRỌNG]: ÉP ĐỒNG BỘ SANG CLOUDFLARE KV
+          try {
+            // Lấy dữ liệu hiện tại từ Cloudflare
+            const res = await fetch(`${API_URL}?uid=${uid}`);
+            let userData = { people: [], expenses: [] };
+            if (res.ok) {
+              userData = await res.json();
+            }
+
+            // Kiểm tra nếu Token trong KV khác với Token máy vừa cấp thì mới update
+            if (userData.fcmToken !== token.value) {
+              await fetch(`${API_URL}?uid=${uid}`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ...userData, fcmToken: token.value }),
+              });
+              console.log(
+                "Đã vá lỗi thiếu Token trên Cloudflare KV thành công!",
+              );
+            }
+          } catch (e) {
+            console.error("Lỗi khi vá Token sang Cloudflare:", e);
+          }
+        }
       });
 
       PushNotifications.addListener(
         "pushNotificationReceived",
         (notification) => {
-          showToast(`Buzz: ${notification.title}`, "buzz");
+          playBuzzSound(); // <--- GỌI ÂM THANH Ở ĐÂY (MÁY NGƯỜI NHẬN SẼ KÊU)
+          showToast(`Buzz: ${notification.title || "Bạn bị đòi nợ!"}`, "buzz");
         },
       );
     }
@@ -2351,9 +3008,14 @@ export default function App() {
         }
       }
 
-      // 3. SẮP XẾP LỊCH SỬ MỚI NHẤT LÊN ĐẦU
-      allExpenses.sort((a, b) => new Date(b.date) - new Date(a.date));
-      setGlobalHistory(allExpenses);
+      // 3. LỌC VÀ SẮP XẾP LỊCH SỬ (CHỈ LẤY GIAO DỊCH CÓ MẶT TÔI)
+      const myRelatedExpenses = allExpenses.filter(
+        (e) =>
+          e.payerId === user.uid ||
+          (e.sharedWith && e.sharedWith.includes(user.uid)),
+      );
+      myRelatedExpenses.sort((a, b) => new Date(b.date) - new Date(a.date));
+      setGlobalHistory(myRelatedExpenses);
 
       // 4. Update Stats
       const statsArray = Object.values(friendMap).sort(
@@ -2374,25 +3036,57 @@ export default function App() {
 
   // --- AUTH + SYNC ---
   useEffect(() => {
-    // [FIX MOBILE] Tạo bộ đếm 4 giây: Nếu mạng lag hoặc Firebase chưa trả về, tự tắt loading để vào App
+    // Lưu lại thời điểm bắt đầu mở app
+    const startTime = Date.now();
+
     const safetyTimer = setTimeout(() => {
       setAuthLoading((prev) => {
-        if (prev) {
-          console.log("Auth timeout - Force loading false");
-          return false;
-        }
+        if (prev) return false;
         return prev;
       });
-    }, 4000);
+    }, 6000); // Tăng safety timer lên chút phòng khi mạng chậm
 
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      clearTimeout(safetyTimer); // Nếu Firebase phản hồi thì xóa timer đi
-      setUser(currentUser);
-      setAuthLoading(false);
+    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      clearTimeout(safetyTimer);
+
       if (currentUser) {
+        // ... (Giữ nguyên phần lưu thông tin user lên Firestore của bạn)
+        try {
+          await setDoc(
+            doc(db, "users", currentUser.uid),
+            {
+              email: currentUser.email,
+              displayName: currentUser.displayName || "",
+              photoURL: currentUser.photoURL || "",
+            },
+            { merge: true },
+          );
+        } catch (error) {
+          console.error("Lỗi lưu thông tin user lên DB: ", error);
+        }
+
         fetchDataFromServer(currentUser.uid);
+
+        if (Capacitor.isNativePlatform()) {
+          PushNotifications.requestPermissions().then((result) => {
+            if (result.receive === "granted") {
+              PushNotifications.register();
+            }
+          });
+        }
       }
+
+      // --- LOGIC MỚI: Ép thời gian loading tối thiểu là 2.5 giây (2500ms) ---
+      const elapsed = Date.now() - startTime;
+      const delay = Math.max(0, 2500 - elapsed); // Nếu Firebase load nhanh quá thì bắt đợi thêm
+
+      setTimeout(() => {
+        setUser(currentUser);
+        setAuthLoading(false); // Tắt màn hình loading sau khi đủ thời gian
+      }, delay);
+      // --------------------------------------------------------------------
     });
+
     return () => {
       clearTimeout(safetyTimer);
       unsubscribe();
@@ -2507,14 +3201,16 @@ export default function App() {
   useEffect(() => {
     if (!user) {
       setMyGroups([]);
-      setContacts([]); // Reset khi logout
+      setContacts([]);
+      setFriendRequests([]); // Reset
       return;
     }
     const unsub = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
       if (docSnap.exists()) {
         const userData = docSnap.data();
         setMyGroups(userData.joinedGroups || []);
-        setContacts(userData.contacts || []); // <--- LẤY DANH BẠ VỀ
+        setContacts(userData.contacts || []);
+        setFriendRequests(userData.friendRequests || []); // <--- THÊM DÒNG NÀY
       }
     });
     return () => unsub();
@@ -2814,11 +3510,38 @@ export default function App() {
     }
   };
 
+  // --- HÀM ĐĂNG XUẤT (ĐÃ FIX: DỌN SẠCH DỮ LIỆU THÀNH BẢNG TRẮNG) ---
   const handleLogout = async () => {
-    await signOut(auth);
-    setUser(null);
-    setIsProfileOpen(false);
-    showToast("Đã đăng xuất.", "info");
+    try {
+      // 1. Đăng xuất khỏi Firebase
+      await signOut(auth);
+
+      // 2. Xóa dữ liệu user và đóng modal
+      setUser(null);
+      setIsProfileOpen(false);
+
+      // 3. Đưa tất cả các state hiển thị trên màn hình về số 0 / mảng rỗng
+      setPeople([]);
+      setExpenses([]);
+      setGroupId("");
+      setIsGroupMode(false);
+      setMyGroups([]);
+      setContacts([]);
+      setGlobalHistory([]);
+      setGlobalFriendStats([]);
+      setGlobalStats({ netWorth: 0, totalOwed: 0, totalDebt: 0 });
+      setActiveTab("dashboard");
+
+      // 4. Quét sạch bộ nhớ đệm (Local Storage) lưu trên máy
+      localStorage.removeItem("sm_people");
+      localStorage.removeItem("sm_expenses");
+      localStorage.removeItem("sm_group_id");
+
+      showToast("Đã đăng xuất an toàn và xóa dữ liệu cục bộ.", "info");
+    } catch (error) {
+      console.error("Lỗi đăng xuất:", error);
+      showToast("Lỗi khi đăng xuất!", "error");
+    }
   };
 
   const showToast = (message, type = "error") => {
@@ -2828,20 +3551,19 @@ export default function App() {
 
   // --- LOGIC TÍNH TOÁN CÔNG NỢ (ĐÃ CẬP NHẬT SETTLEMENT) ---
   const calculateNetDebt = (personId) => {
-    let balance = 0;
+    if (!user) return 0;
+    let balance = 0; // Dương = Họ nợ mình, Âm = Mình nợ họ
+
     expenses.forEach((exp) => {
       const amount = parseFloat(exp.amount);
       const payerId = exp.payerId || "me";
-      const settledBy = exp.settledBy || []; // Danh sách người đã trả tiền
+      const settledBy = exp.settledBy || [];
 
-      // Hàm helper để tính share của một người bất kỳ trong bill này
       const getShareOf = (uid) => {
         if (exp.type === "custom") {
           return parseFloat(exp.customShares?.[uid] || 0);
         } else {
-          let count = exp.sharedWith.length; // <--- BẠN ĐANG CÓ DÒNG NÀY
-
-          // --- HÃY DÁN ĐOẠN FIX VÀO NGAY SAU DÒNG TRÊN ---
+          let count = exp.sharedWith.length;
           if (exp.type === "full") {
             const realPayerId = exp.payerId === "me" ? user?.uid : exp.payerId;
             const validDebtors = exp.sharedWith.filter((id) => {
@@ -2851,34 +3573,26 @@ export default function App() {
             count = validDebtors.length;
           }
           if (count === 0) return 0;
-          // ------------------------------------------------
-
           return amount / count;
         }
       };
 
-      // TRƯỜNG HỢP 1: personId là NGƯỜI TRẢ TIỀN (Chủ nợ)
-      if (payerId === personId) {
-        // Họ đã chi tiền. Ta cần tính xem "Xã hội" còn nợ họ bao nhiêu.
-        // Chỉ cộng dồn những khoản của người CHƯA TRẢ (chưa nằm trong settledBy).
-
-        let totalOwedToPayer = 0;
-        exp.sharedWith.forEach((debtorId) => {
-          if (debtorId === personId) return; // Bỏ qua chính họ
-
-          // Nếu người nợ này CHƯA có trong danh sách đã trả -> Cộng vào khoản phải thu
-          if (!settledBy.includes(debtorId)) {
-            totalOwedToPayer += getShareOf(debtorId);
-          }
-        });
-
-        // balance âm biểu thị "Được nợ"
-        balance -= totalOwedToPayer;
-      } else if (exp.sharedWith.includes(personId)) {
-        // TRƯỜNG HỢP 2: personId là NGƯỜI TIÊU (Con nợ)
-        // Nếu họ CHƯA TRẢ (không có trong settledBy) -> Cộng nợ
-        if (!settledBy.includes(personId)) {
+      // CHỈ TÍNH TOÁN NẾU GIAO DỊCH NÀY TRỰC TIẾP GIỮA TÔI VÀ PERSON_ID
+      if (payerId === user.uid) {
+        // TÔI trả tiền -> Kiểm tra xem PersonId có nợ tôi không
+        if (
+          exp.sharedWith.includes(personId) &&
+          !settledBy.includes(personId)
+        ) {
           balance += getShareOf(personId);
+        }
+      } else if (payerId === personId) {
+        // PERSON_ID trả tiền -> Kiểm tra xem Tôi có nợ họ không
+        if (
+          exp.sharedWith.includes(user.uid) &&
+          !settledBy.includes(user.uid)
+        ) {
+          balance -= getShareOf(user.uid);
         }
       }
     });
@@ -2978,32 +3692,453 @@ export default function App() {
 
   const [editingContact, setEditingContact] = useState(null);
 
-  // --- 1. SỬA HÀM THÊM LIÊN HỆ (CHO PHÉP EMAIL RỖNG) ---
-  const addToContacts = async () => {
-    if (!newPersonName.trim()) return showToast("Vui lòng nhập tên!", "error");
-    // Không check email nữa, cho phép rỗng
+  // --- 1. GỬI LỜI MỜI KẾT BẠN ---
+  const sendFriendRequest = async () => {
+    const emailToSearch = newPersonEmail.trim();
+    if (!emailToSearch)
+      return showToast("Vui lòng nhập Email để tìm kiếm!", "error");
+    if (emailToSearch === user.email)
+      return showToast("Không thể tự kết bạn với chính mình!", "error");
 
     try {
-      const newContact = {
-        id: uuidv4(),
-        name: newPersonName,
-        email: newPersonEmail.trim() || "", // Nếu không nhập thì là chuỗi rỗng
-        createdAt: new Date().toISOString(),
+      // Tìm user trên hệ thống
+      const usersRef = collection(db, "users");
+      const q = query(usersRef, where("email", "==", emailToSearch));
+      const snap = await getDocs(q);
+
+      if (snap.empty) {
+        return showToast(
+          "Không tìm thấy tài khoản nào với Email này!",
+          "error",
+        );
+      }
+
+      const targetUid = snap.docs[0].id;
+
+      // Kiểm tra xem đã là bạn bè chưa
+      if (contacts.some((c) => c.id === targetUid)) {
+        return showToast("Hai bạn đã là bạn bè rồi!", "info");
+      }
+
+      // Đẩy lời mời vào hộp thư của người kia
+      const requestData = {
+        id: user.uid,
+        name: user.displayName || user.email.split("@")[0],
+        email: user.email,
+        photoURL: user.photoURL || "",
+        timestamp: new Date().toISOString(),
       };
 
-      await updateDoc(doc(db, "users", user.uid), {
-        contacts: arrayUnion(newContact),
+      await updateDoc(doc(db, "users", targetUid), {
+        friendRequests: arrayUnion(requestData),
       });
 
-      setNewPersonName("");
-      setNewPersonEmail("");
-      showToast("Đã thêm vào danh bạ!", "success");
+      showToast("Đã gửi lời mời kết bạn!", "success");
+      setNewPersonEmail(""); // Xóa ô nhập
     } catch (e) {
       console.error(e);
-      showToast("Lỗi thêm danh bạ: " + e.message, "error");
+      showToast("Lỗi gửi lời mời: " + e.message, "error");
     }
   };
 
+  // --- 1. HÀM TÌM KIẾM NGƯỜI DÙNG TRÊN HỆ THỐNG ---
+  const searchNetwork = async (e) => {
+    e.preventDefault();
+    if (!searchQuery.trim() || !user) return;
+    setIsSearching(true);
+    try {
+      const usersRef = collection(db, "users");
+      const snap = await getDocs(usersRef);
+      const term = searchQuery.toLowerCase();
+      const results = [];
+
+      // Lọc dữ liệu client-side (Cho phép tìm gần đúng cả tên và email)
+      snap.forEach((doc) => {
+        if (doc.id === user.uid) return; // Bỏ qua chính mình
+        const data = doc.data();
+        const nameMatch = data.displayName?.toLowerCase().includes(term);
+        const emailMatch = data.email?.toLowerCase().includes(term);
+
+        if (nameMatch || emailMatch) {
+          results.push({
+            id: doc.id,
+            name: data.displayName || data.email.split("@")[0],
+            email: data.email,
+            photoURL: data.photoURL || "",
+          });
+        }
+      });
+      setSearchResults(results);
+    } catch (err) {
+      showToast("Lỗi tìm kiếm: " + err.message, "error");
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // --- 2. HÀM GỬI LỜI MỜI (DÀNH CHO NÚT KẾT BẠN TRONG TÌM KIẾM) ---
+  const handleAddFriendFromSearch = async (targetUser) => {
+    try {
+      const requestData = {
+        id: user.uid,
+        name: user.displayName || user.email.split("@")[0],
+        email: user.email,
+        photoURL: user.photoURL || "",
+        timestamp: new Date().toISOString(),
+      };
+      await updateDoc(doc(db, "users", targetUser.id), {
+        friendRequests: arrayUnion(requestData),
+      });
+      showToast(`Đã gửi lời mời đến ${targetUser.name}!`, "success");
+    } catch (e) {
+      showToast("Lỗi gửi lời mời: " + e.message, "error");
+    }
+  };
+
+  // --- 3. HÀM HỦY KẾT BẠN (UNFRIEND) ---
+  const handleUnfriend = (friendId) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "Hủy kết bạn?",
+      message:
+        "Bạn có chắc muốn hủy kết bạn? Người này sẽ bị xóa khỏi danh bạ của bạn.",
+      onConfirm: async () => {
+        try {
+          // Xóa khỏi danh bạ của MÌNH
+          const myUpdatedContacts = contacts.filter((c) => c.id !== friendId);
+          await setDoc(
+            doc(db, "users", user.uid),
+            { contacts: myUpdatedContacts },
+            { merge: true },
+          );
+
+          // Xóa mình khỏi danh bạ của HỌ
+          const friendRef = doc(db, "users", friendId);
+          const friendSnap = await getDoc(friendRef);
+          if (friendSnap.exists()) {
+            const theirContacts = friendSnap.data().contacts || [];
+            const theirUpdatedContacts = theirContacts.filter(
+              (c) => c.id !== user.uid,
+            );
+            await updateDoc(friendRef, { contacts: theirUpdatedContacts });
+          }
+
+          setContacts(myUpdatedContacts);
+          showToast("Đã hủy kết bạn!", "success");
+          setConfirmDialog({ isOpen: false });
+        } catch (e) {
+          showToast("Lỗi: " + e.message, "error");
+        }
+      },
+    });
+  };
+
+  // --- 4. HÀM HỢP NHẤT TÀI KHOẢN ẢO VÀO TÀI KHOẢN THẬT ---
+  const executeMergeContact = async (realFriend) => {
+    if (!mergingContact || !realFriend || !user) return;
+    const fakeId = mergingContact.id;
+    const realId = realFriend.id;
+
+    try {
+      // 1. Xóa tài khoản ảo khỏi danh bạ
+      const updatedContacts = contacts.filter((c) => c.id !== fakeId);
+      await setDoc(
+        doc(db, "users", user.uid),
+        { contacts: updatedContacts },
+        { merge: true },
+      );
+      setContacts(updatedContacts);
+
+      // 2. Chạy qua tất cả các nhóm để thay thế ID
+      for (const g of myGroups) {
+        const groupRef = doc(db, "groups", g.id);
+        const groupSnap = await getDoc(groupRef);
+
+        if (groupSnap.exists()) {
+          const groupData = groupSnap.data();
+          let groupMembers = groupData.members || [];
+          let groupExpenses = groupData.expenses || [];
+
+          // Nếu tài khoản ảo có trong nhóm này
+          if (groupMembers.some((m) => m.id === fakeId)) {
+            // A. Đổi ID trong danh sách thành viên
+            groupMembers = groupMembers.map((m) =>
+              m.id === fakeId
+                ? {
+                    ...m,
+                    id: realId,
+                    name: realFriend.name,
+                    photoURL: realFriend.photoURL,
+                    email: realFriend.email,
+                  }
+                : m,
+            );
+
+            // B. Đổi ID trong toàn bộ lịch sử giao dịch
+            groupExpenses = groupExpenses.map((exp) => {
+              let newExp = { ...exp };
+              if (newExp.payerId === fakeId) newExp.payerId = realId;
+              if (newExp.sharedWith?.includes(fakeId)) {
+                newExp.sharedWith = newExp.sharedWith.map((id) =>
+                  id === fakeId ? realId : id,
+                );
+              }
+              if (newExp.settledBy?.includes(fakeId)) {
+                newExp.settledBy = newExp.settledBy.map((id) =>
+                  id === fakeId ? realId : id,
+                );
+              }
+              if (
+                newExp.customShares &&
+                newExp.customShares[fakeId] !== undefined
+              ) {
+                newExp.customShares[realId] = newExp.customShares[fakeId];
+                delete newExp.customShares[fakeId];
+              }
+              return newExp;
+            });
+
+            // C. Lưu lên DB
+            await updateDoc(groupRef, {
+              members: groupMembers,
+              expenses: groupExpenses,
+            });
+
+            // D. Bắn nhóm này cho người bạn thật để họ thấy
+            const groupInfoForFriend = {
+              id: g.id,
+              name: groupData.name || "Nhóm",
+              icon: groupData.icon || "💰",
+            };
+            await updateDoc(doc(db, "users", realId), {
+              joinedGroups: arrayUnion(groupInfoForFriend),
+            });
+          }
+        }
+      }
+
+      showToast(
+        `Đã đồng bộ ${mergingContact.name} vào tài khoản thật thành công!`,
+        "success",
+      );
+      setMergingContact(null);
+    } catch (e) {
+      showToast("Lỗi đồng bộ: " + e.message, "error");
+    }
+  };
+
+  // --- HÀM MỚI: THÊM LIÊN HỆ KHÔNG CẦN EMAIL ---
+  const handleAddLocalContact = async () => {
+    if (!newLocalContactName.trim()) {
+      return showToast("Vui lòng nhập tên người muốn thêm!", "error");
+    }
+    if (!user) return showToast("Vui lòng đăng nhập!", "error");
+
+    try {
+      const newContact = {
+        id: uuidv4(), // Tạo một ID ảo
+        name: newLocalContactName.trim(),
+        email: "", // Bỏ trống email
+        photoURL: "",
+        createdAt: new Date().toISOString(),
+      };
+
+      const updatedList = [...contacts, newContact];
+
+      // Lưu lên Firestore
+      await setDoc(
+        doc(db, "users", user.uid),
+        { contacts: updatedList },
+        { merge: true },
+      );
+
+      setContacts(updatedList);
+      setNewLocalContactName(""); // Xóa rỗng ô nhập
+      showToast("Đã thêm người mới vào danh bạ!", "success");
+    } catch (e) {
+      console.error(e);
+      showToast("Lỗi thêm liên hệ: " + e.message, "error");
+    }
+  };
+
+  // --- 2. CHẤP NHẬN LỜI MỜI (ĐỒNG BỘ TOÀN DIỆN DANH BẠ & NHÓM CŨ) ---
+  const handleAcceptRequest = async (requester) => {
+    if (!user) return;
+    try {
+      // A. Xóa khỏi danh sách chờ
+      const updatedRequests = friendRequests.filter(
+        (req) => req.id !== requester.id,
+      );
+
+      // B. XỬ LÝ DANH BẠ CỦA MÌNH (GỘP NẾU TRÙNG EMAIL)
+      let myUpdatedContacts = [...contacts];
+      const existingIndex = myUpdatedContacts.findIndex(
+        (c) => c.email === requester.email,
+      );
+      let oldFakeId = null;
+
+      const newContactForMe = {
+        id: requester.id, // ID thật của Firebase
+        name: requester.name,
+        email: requester.email,
+        photoURL: requester.photoURL || "",
+        createdAt: new Date().toISOString(),
+      };
+
+      if (existingIndex >= 0) {
+        oldFakeId = myUpdatedContacts[existingIndex].id; // Lưu lại ID ảo cũ để đi tìm trong các nhóm
+        myUpdatedContacts[existingIndex] = {
+          ...myUpdatedContacts[existingIndex],
+          ...newContactForMe,
+        };
+      } else {
+        myUpdatedContacts.push(newContactForMe);
+      }
+
+      await updateDoc(doc(db, "users", user.uid), {
+        friendRequests: updatedRequests,
+        contacts: myUpdatedContacts,
+      });
+
+      // C. XỬ LÝ DANH BẠ CỦA NGƯỜI KIA
+      const requesterRef = doc(db, "users", requester.id);
+      const requesterSnap = await getDoc(requesterRef);
+
+      if (requesterSnap.exists()) {
+        let requesterContacts = requesterSnap.data().contacts || [];
+        const meIndexInTheirs = requesterContacts.findIndex(
+          (c) => c.email === user.email,
+        );
+
+        const myInfoForThem = {
+          id: user.uid,
+          name: user.displayName || user.email.split("@")[0],
+          email: user.email,
+          photoURL: user.photoURL || "",
+          createdAt: new Date().toISOString(),
+        };
+
+        if (meIndexInTheirs >= 0) {
+          requesterContacts[meIndexInTheirs] = {
+            ...requesterContacts[meIndexInTheirs],
+            ...myInfoForThem,
+          };
+        } else {
+          requesterContacts.push(myInfoForThem);
+        }
+
+        await updateDoc(requesterRef, { contacts: requesterContacts });
+      }
+
+      // ==========================================
+      // D. NÂNG CẤP: ĐỒNG BỘ ID VÀO CÁC NHÓM CŨ ĐÃ THAM GIA
+      // ==========================================
+      // Nếu phát hiện ra có ID ảo cũ (nhập tay) và ID này khác với ID thật
+      if (oldFakeId && oldFakeId !== requester.id) {
+        // Duyệt qua tất cả các nhóm của bạn
+        for (const g of myGroups) {
+          const groupRef = doc(db, "groups", g.id);
+          const groupSnap = await getDoc(groupRef);
+
+          if (groupSnap.exists()) {
+            const groupData = groupSnap.data();
+            let members = groupData.members || [];
+            let expenses = groupData.expenses || [];
+
+            // Kiểm tra xem nhóm này có Thu Hà (ảo) không?
+            const memberIndex = members.findIndex((m) => m.id === oldFakeId);
+
+            if (memberIndex >= 0) {
+              // 1. Cập nhật thành viên: Thay ID ảo bằng ID thật, cập nhật Avatar
+              members[memberIndex] = {
+                ...members[memberIndex],
+                id: requester.id,
+                photoURL: requester.photoURL || "",
+                name: requester.name, // Lấy tên thật của họ
+              };
+
+              // 2. Cập nhật Lịch sử giao dịch: Tìm tất cả chỗ nào có ID ảo -> Đổi thành ID thật
+              const updatedExpenses = expenses.map((exp) => {
+                let newExp = { ...exp };
+
+                // Đổi người trả tiền
+                if (newExp.payerId === oldFakeId) newExp.payerId = requester.id;
+
+                // Đổi người tham gia (chia tiền)
+                if (
+                  newExp.sharedWith &&
+                  newExp.sharedWith.includes(oldFakeId)
+                ) {
+                  newExp.sharedWith = newExp.sharedWith.map((id) =>
+                    id === oldFakeId ? requester.id : id,
+                  );
+                }
+
+                // Đổi người đã xác nhận trả (settled)
+                if (newExp.settledBy && newExp.settledBy.includes(oldFakeId)) {
+                  newExp.settledBy = newExp.settledBy.map((id) =>
+                    id === oldFakeId ? requester.id : id,
+                  );
+                }
+
+                // Đổi Object chia tiền chi tiết (customShares)
+                if (
+                  newExp.customShares &&
+                  newExp.customShares[oldFakeId] !== undefined
+                ) {
+                  newExp.customShares[requester.id] =
+                    newExp.customShares[oldFakeId];
+                  delete newExp.customShares[oldFakeId];
+                }
+
+                return newExp;
+              });
+
+              // 3. Lưu toàn bộ dữ liệu Nhóm mới lên Firebase
+              await updateDoc(groupRef, {
+                members: members,
+                expenses: updatedExpenses,
+              });
+
+              // 4. BẮN NHÓM NÀY SANG CHO NGƯỜI KIA (Để họ thấy nhóm cũ ngay lập tức)
+              const groupInfoForFriend = {
+                id: g.id,
+                name: groupData.name || "Nhóm",
+                icon: groupData.icon || "💰",
+              };
+
+              await updateDoc(doc(db, "users", requester.id), {
+                joinedGroups: arrayUnion(groupInfoForFriend),
+              });
+            }
+          }
+        }
+      }
+
+      showToast("Đã đồng bộ toàn bộ bạn bè và nhóm thành công!", "success");
+    } catch (e) {
+      console.error("Lỗi đồng bộ:", e);
+      showToast("Lỗi: " + e.message, "error");
+    }
+  };
+
+  // --- 3. TỪ CHỐI LỜI MỜI ---
+  const handleDeclineRequest = async (requesterId) => {
+    if (!user) return;
+    try {
+      const updatedRequests = friendRequests.filter(
+        (req) => req.id !== requesterId,
+      );
+      await updateDoc(doc(db, "users", user.uid), {
+        friendRequests: updatedRequests,
+      });
+      showToast("Đã từ chối lời mời", "info");
+    } catch (e) {
+      showToast("Lỗi: " + e.message, "error");
+    }
+  };
+
+  // --- 2. HÀM CẬP NHẬT LIÊN HỆ (SỬA TÊN/EMAIL) ---
   // --- 2. HÀM CẬP NHẬT LIÊN HỆ (SỬA TÊN/EMAIL) ---
   const handleUpdateContact = async (updatedName, updatedEmail) => {
     if (!editingContact || !user) return;
@@ -3011,27 +4146,59 @@ export default function App() {
       return showToast("Tên không được để trống", "error");
 
     try {
-      // Vì Firestore không hỗ trợ update 1 phần tử trong mảng, ta phải lấy cả mảng về, sửa, rồi lưu lại.
       const updatedList = contacts.map((c) =>
         c.id === editingContact.id
           ? { ...c, name: updatedName, email: updatedEmail.trim() }
           : c,
       );
 
-      // Cập nhật lên Server
-      await updateDoc(doc(db, "users", user.uid), {
-        contacts: updatedList,
-      });
+      // [SỬA LỖI]: Dùng setDoc với { merge: true } thay vì updateDoc
+      await setDoc(
+        doc(db, "users", user.uid),
+        {
+          contacts: updatedList,
+        },
+        { merge: true },
+      );
 
-      // Cập nhật UI (Optimistic update)
       setContacts(updatedList);
-
-      setEditingContact(null); // Đóng modal
+      setEditingContact(null);
       showToast("Đã cập nhật thông tin!", "success");
     } catch (e) {
       console.error(e);
       showToast("Lỗi cập nhật: " + e.message, "error");
     }
+  };
+
+  // --- 3. HÀM XÓA LIÊN HỆ (MỚI) ---
+  const handleDeleteContact = (contactId) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "Xóa khỏi danh bạ?",
+      message: "Bạn có chắc chắn muốn xóa người này khỏi danh bạ chung không?",
+      onConfirm: async () => {
+        if (!user) return;
+        try {
+          const updatedList = contacts.filter((c) => c.id !== contactId);
+
+          await setDoc(
+            doc(db, "users", user.uid),
+            {
+              contacts: updatedList,
+            },
+            { merge: true },
+          );
+
+          setContacts(updatedList);
+          showToast("Đã xóa liên hệ!", "success");
+          setConfirmDialog({ isOpen: false });
+        } catch (e) {
+          console.error(e);
+          showToast("Lỗi khi xóa: " + e.message, "error");
+          setConfirmDialog({ isOpen: false });
+        }
+      },
+    });
   };
 
   // --- HÀM: XÁC NHẬN THANH TOÁN (BẢN FIX LỖI) ---
@@ -3213,9 +4380,11 @@ export default function App() {
 
           if (selectedPersonId === id) setSelectedPersonId(null);
           showToast("Đã xóa thành viên", "success");
+          setConfirmDialog((prev) => ({ ...prev, isOpen: false })); // <--- THÊM DÒNG NÀY
         } catch (e) {
           console.error(e);
           showToast("Lỗi khi xóa thành viên", "error");
+          setConfirmDialog((prev) => ({ ...prev, isOpen: false })); // <--- THÊM DÒNG NÀY
         }
       },
     });
@@ -3254,22 +4423,53 @@ export default function App() {
     }
   };
 
-  // --- LOGIC BUZZ (GIỤC NỢ) ---
-  const handleBuzz = (person) => {
-    if (!person.email) {
-      showToast(
-        `Chưa gán Email cho ${person.name}! Sửa thông tin để thêm.`,
-        "error",
-      );
+  // --- LOGIC BUZZ (GIỤC NỢ) TỐI ƯU ---
+  const handleBuzz = async (person) => {
+    if (!person.id) {
+      showToast(`Lỗi: Không tìm thấy ID của ${person.name}!`, "error");
       return;
     }
 
-    // LOGIC GỬI NOTIFICATION:
-    // Đây là nơi bạn gọi API lên Server của bạn để bắn FCM Push Notification
-    // Ví dụ: fetch(`${API_URL}/buzz`, { method: 'POST', body: JSON.stringify({ to: person.email }) })
+    try {
+      // 1. Kéo thẳng FCM Token của người nợ từ Firestore
+      const userDocRef = doc(db, "users", person.id);
+      const userSnap = await getDoc(userDocRef);
 
-    // Hiện tại giả lập thành công:
-    showToast(`Đã BUZZ tới ${person.email}!`, "buzz");
+      if (!userSnap.exists() || !userSnap.data().fcmToken) {
+        showToast(
+          `Không thể Buzz! ${person.name} chưa cài app hoặc chưa bật thông báo.`,
+          "error",
+        );
+        return;
+      }
+
+      const targetFcmToken = userSnap.data().fcmToken;
+
+      // 2. Phát âm thanh ở máy mình trước cho vui tai
+      playBuzzSound();
+      showToast(`Đã BUZZ tới ${person.name}!`, "buzz");
+
+      // 3. Gửi Token thẳng lên Backend để đẩy thông báo
+      const response = await fetch(`${API_URL}/buzz`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          fcmToken: targetFcmToken, // Truyền thẳng token lên đây
+          title: "Bíp bíp! Đòi nợ!!! 💸",
+          body: `${
+            user.displayName || "Ai đó"
+          } đang gọi bạn vào thanh toán kìa!`,
+        }),
+      });
+
+      if (!response.ok) {
+        console.error("Backend phản hồi lỗi:", await response.text());
+      }
+    } catch (error) {
+      console.error("Lỗi khi gọi API Buzz:", error);
+    }
   };
 
   const openAddModal = () => {
@@ -3281,15 +4481,36 @@ export default function App() {
     setIsModalOpen(true);
   };
 
-  // Thay thế hàm handleSaveExpense cũ bằng hàm này:
+  // --- HÀM LƯU GIAO DỊCH (ĐÃ FIX LỖI "me") ---
   const handleSaveExpense = async (expenseData) => {
-    // Xác định đang thao tác ở nhóm nào
-    // 1. Nếu đang sửa (editingExpense) -> Lấy groupId của chính expense đó
-    // 2. Nếu không -> Lấy groupId hiện tại của App
     const targetGroupId = editingExpense?.groupId || groupId;
-
     if (!targetGroupId)
       return showToast("Lỗi: Không xác định được nhóm.", "error");
+
+    // [BƯỚC QUAN TRỌNG]: Dịch tất cả chữ "me" thành UID thật của máy đang dùng trước khi lưu
+    const realUid = user.uid;
+    let cleanData = { ...expenseData };
+
+    if (cleanData.payerId === "me") cleanData.payerId = realUid;
+
+    if (cleanData.sharedWith) {
+      cleanData.sharedWith = [
+        ...new Set(
+          cleanData.sharedWith.map((id) => (id === "me" ? realUid : id)),
+        ),
+      ];
+    }
+    if (cleanData.customShares && cleanData.customShares["me"] !== undefined) {
+      cleanData.customShares[realUid] = cleanData.customShares["me"];
+      delete cleanData.customShares["me"];
+    }
+    if (cleanData.settledBy) {
+      cleanData.settledBy = [
+        ...new Set(
+          cleanData.settledBy.map((id) => (id === "me" ? realUid : id)),
+        ),
+      ];
+    }
 
     try {
       const groupRef = doc(db, "groups", targetGroupId);
@@ -3300,32 +4521,33 @@ export default function App() {
         let updatedExpenses = data.expenses || [];
 
         if (editingExpense) {
-          // --- LOGIC SỬA ---
           updatedExpenses = updatedExpenses.map((e) =>
             e.id === editingExpense.id
               ? {
-                  ...expenseData,
+                  ...cleanData,
                   id: editingExpense.id,
-                  // Giữ lại các trường quan trọng cũ
                   comments: e.comments || [],
                   billImage: e.billImage || null,
                 }
               : e,
           );
         } else {
-          // --- LOGIC THÊM MỚI ---
           updatedExpenses.push({
-            ...expenseData,
+            ...cleanData,
             id: uuidv4(),
             comments: [],
             billImage: null,
           });
         }
 
-        await updateDoc(groupRef, { expenses: updatedExpenses });
-
+        // 1. Đóng form NGAY LẬP TỨC để iPad không bị cảm giác đơ (Optimistic UI)
         setIsModalOpen(false);
         setEditingExpense(null);
+
+        // 2. Chạy ngầm lưu dữ liệu lên Firebase
+        await updateDoc(groupRef, { expenses: updatedExpenses });
+
+        // 3. Báo thành công
         showToast(
           editingExpense ? "Đã cập nhật!" : "Đã thêm khoản mới!",
           "success",
@@ -3339,8 +4561,41 @@ export default function App() {
 
   if (authLoading) {
     return (
-      <div className="h-screen w-screen flex items-center justify-center bg-gray-50">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
+      <div className="fixed inset-0 h-[100dvh] w-screen flex flex-col items-center justify-center bg-gradient-to-br from-indigo-600 to-violet-600 relative overflow-hidden z-[9999]">
+        {/* --- Hiệu ứng ánh sáng nền (Glow Blur) --- */}
+        <div className="absolute top-[-10%] right-[-10%] w-72 h-72 bg-white/10 rounded-full blur-3xl pointer-events-none animate-pulse"></div>
+        <div
+          className="absolute bottom-[-10%] left-[-10%] w-72 h-72 bg-indigo-400/20 rounded-full blur-3xl pointer-events-none animate-pulse"
+          style={{ animationDelay: "1s" }}
+        ></div>
+
+        <div className="relative z-10 flex flex-col items-center animate-fade-in">
+          {/* --- Icon App (ĐÃ THAY THÀNH <img> VỚI LOGO XỊN) --- */}
+          <div className="w-28 h-28 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-900/50 mb-8 relative">
+            {/* Đổi object-contain thành object-cover và bo góc cho khớp hoàn toàn */}
+            <img
+              src={appIcon}
+              alt="Split Money Logo"
+              className="w-full h-full object-cover rounded-[2rem] relative z-10"
+            />
+          </div>
+
+          {/* --- Vòng xoay Loading Custom --- */}
+          <div className="relative w-12 h-12 mb-5">
+            {/* Vòng mờ bên dưới */}
+            <div className="absolute inset-0 border-4 border-white/20 rounded-full"></div>
+            {/* Vòng chạy xoay bên trên */}
+            <div className="absolute inset-0 border-4 border-white border-t-transparent border-l-transparent rounded-full animate-spin"></div>
+          </div>
+
+          {/* --- Tên App & Dòng chữ Loading --- */}
+          <h2 className="text-2xl font-bold text-white tracking-wide mb-1 drop-shadow-md">
+            Split Money
+          </h2>
+          <p className="text-indigo-200 text-sm font-medium animate-pulse">
+            Đang tải dữ liệu...
+          </p>
+        </div>
       </div>
     );
   }
@@ -3403,7 +4658,7 @@ export default function App() {
           </div>
 
           {/* List Bình luận */}
-          <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-50 space-y-4">
+          <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-50/50 shadow-[inset_0_4px_20px_rgba(0,0,0,0.02)] bg-slate-50 space-y-4">
             {!expense.comments || expense.comments.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-gray-400 opacity-60">
                 <MessageSquare size={48} className="mb-2 text-gray-300" />
@@ -3439,7 +4694,7 @@ export default function App() {
                       <div
                         className={`px-3 py-2 rounded-2xl text-sm ${
                           isMe
-                            ? "bg-blue-600 text-white rounded-tr-none"
+                            ? "bg-indigo-500 text-white rounded-tr-none"
                             : "bg-white border border-gray-200 text-gray-800 rounded-tl-none shadow-sm"
                         }`}
                       >
@@ -3473,7 +4728,7 @@ export default function App() {
             <button
               onClick={handleSend}
               disabled={!text.trim()}
-              className="p-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-blue-200"
+              className="p-2.5 bg-indigo-500 text-white rounded-xl hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-lg shadow-indigo-200/50"
             >
               <Send size={18} />
             </button>
@@ -3525,7 +4780,7 @@ export default function App() {
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header trang trí */}
-          <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-blue-600 to-indigo-600"></div>
+          <div className="absolute top-0 left-0 right-0 h-2 bg-gradient-to-r from-indigo-600 to-violet-500"></div>
 
           <button
             onClick={() => setSharingGroup(null)}
@@ -3543,7 +4798,7 @@ export default function App() {
             </p>
 
             {/* HIỂN THỊ MÃ NHÓM TO RÕ */}
-            <div className="bg-gray-50 border-2 border-dashed border-blue-200 rounded-2xl p-6 mb-8 relative group">
+            <div className="bg-gray-50 border-2 border-dashed border-violet-100 rounded-2xl p-6 mb-8 relative group">
               <p className="text-[10px] font-bold text-blue-500 uppercase tracking-widest mb-2">
                 Mã gia nhập nhóm
               </p>
@@ -3556,7 +4811,7 @@ export default function App() {
                   navigator.clipboard.writeText(groupCode);
                   showToast("Đã copy mã nhóm!", "success");
                 }}
-                className="mt-4 px-6 py-2 bg-white border border-gray-200 rounded-xl text-sm font-bold text-blue-600 hover:bg-blue-50 shadow-sm transition-all active:scale-95"
+                className="mt-4 px-6 py-2 bg-white border border-gray-200 rounded-xl text-sm font-bold text-indigo-600 hover:bg-violet-50/50 shadow-sm transition-all active:scale-95"
               >
                 Sao chép mã
               </button>
@@ -3583,7 +4838,7 @@ export default function App() {
                   showToast("Đã copy nội dung mời!", "success");
                 }
               }}
-              className="w-full py-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl font-bold shadow-lg shadow-blue-200 active:scale-95 transition-all flex items-center justify-center gap-2"
+              className="w-full py-4 bg-gradient-to-r from-indigo-600 to-violet-500 text-white rounded-2xl font-bold shadow-lg shadow-indigo-200/50 active:scale-95 transition-all flex items-center justify-center gap-2"
             >
               <Share2 size={20} /> Gửi cho bạn bè
             </button>
@@ -3644,8 +4899,19 @@ export default function App() {
       <HistoryModal
         isOpen={isHistoryModalOpen}
         onClose={() => setIsHistoryModalOpen(false)}
-        // LOGIC MỚI: Nếu có groupId (trong nhóm) -> Lấy expenses. Nếu không (trang chủ) -> Lấy globalHistory
-        expenses={groupId ? expenses : globalHistory}
+        expenses={
+          groupId
+            ? [...expenses]
+                .filter(
+                  (e) =>
+                    e.payerId === user?.uid || e.sharedWith.includes(user?.uid),
+                )
+                .sort(
+                  (a, b) =>
+                    new Date(b.date).getTime() - new Date(a.date).getTime(),
+                ) /* <--- THÊM SẮP XẾP Ở ĐÂY */
+            : globalHistory
+        }
         people={people}
         renderHistoryItem={(exp) => renderHistoryItem(exp)}
       />
@@ -3655,6 +4921,15 @@ export default function App() {
         contact={editingContact}
         onClose={() => setEditingContact(null)}
         onSave={handleUpdateContact}
+      />
+
+      {/* --- CHÈN MODAL HỢP NHẤT Ở ĐÂY --- */}
+      <MergeContactModal
+        isOpen={!!mergingContact}
+        onClose={() => setMergingContact(null)}
+        fakeContact={mergingContact}
+        realContacts={contacts.filter((c) => c.email)}
+        onConfirm={executeMergeContact}
       />
 
       {/* MODAL BÌNH LUẬN RIÊNG BIỆT */}
@@ -3707,7 +4982,7 @@ export default function App() {
                       onClick={() => setSelectedIcon(icon)}
                       className={`text-2xl w-12 h-12 flex items-center justify-center rounded-xl transition-all ${
                         selectedIcon === icon
-                          ? "bg-blue-600 shadow-lg scale-110 shadow-blue-200"
+                          ? "bg-indigo-500 shadow-lg scale-110 shadow-indigo-200/50"
                           : "hover:bg-white hover:shadow-sm"
                       }`}
                     >
@@ -3732,8 +5007,8 @@ export default function App() {
               </div>
 
               {/* KHU VỰC CHỌN THÀNH VIÊN TỪ DANH BẠ (LOGIC MỚI) */}
-              <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100">
-                <label className="block text-sm font-bold text-blue-800 mb-3 flex items-center gap-2">
+              <div className="bg-violet-50/50/50 p-4 rounded-xl border border-blue-100">
+                <label className="block text-sm font-bold text-indigo-700 mb-3 flex items-center gap-2">
                   <Users size={16} /> Chọn thành viên từ Danh bạ
                 </label>
                 {/* NÚT CHỌN TẤT CẢ (MỚI) */}
@@ -3755,7 +5030,7 @@ export default function App() {
                           setTempMembers(allMembers);
                         }
                       }}
-                      className="text-xs font-bold text-blue-600 hover:bg-blue-100 px-3 py-1.5 rounded-lg transition-colors"
+                      className="text-xs font-bold text-indigo-600 hover:bg-violet-100 px-3 py-1.5 rounded-lg transition-colors"
                     >
                       {tempMembers.length === contacts.length
                         ? "Bỏ chọn tất cả"
@@ -3804,7 +5079,7 @@ export default function App() {
                           }}
                           className={`flex items-center gap-2 px-3 py-2 rounded-xl border transition-all text-sm font-bold ${
                             isSelected
-                              ? "bg-blue-600 text-white border-blue-600 shadow-md transform scale-105"
+                              ? "bg-indigo-500 text-white border-blue-600 shadow-md transform scale-105"
                               : "bg-white text-gray-700 border-gray-200 hover:border-blue-300"
                           }`}
                         >
@@ -3823,7 +5098,7 @@ export default function App() {
 
                 {/* Hiển thị số lượng đã chọn */}
                 {contacts.length > 0 && (
-                  <p className="text-right text-xs text-blue-600 font-bold mt-2">
+                  <p className="text-right text-xs text-indigo-600 font-bold mt-2">
                     Đã chọn: {tempMembers.length} thành viên
                   </p>
                 )}
@@ -3839,7 +5114,7 @@ export default function App() {
               </button>
               <button
                 onClick={handleCreateNewGroup}
-                className="flex-1 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 hover:shadow-lg hover:shadow-blue-200 text-white font-bold rounded-xl transition-all transform active:scale-95"
+                className="flex-1 py-3 bg-gradient-to-r from-indigo-600 to-violet-500 hover:shadow-lg hover:shadow-indigo-200/50 text-white font-bold rounded-xl transition-all transform active:scale-95"
               >
                 Tạo nhóm ngay
               </button>
@@ -3868,7 +5143,7 @@ export default function App() {
                       onClick={() => setSelectedIcon(icon)}
                       className={`text-xl w-10 h-10 flex items-center justify-center rounded-lg transition-all ${
                         selectedIcon === icon
-                          ? "bg-blue-600 scale-110 shadow-md shadow-blue-200"
+                          ? "bg-indigo-500 scale-110 shadow-md shadow-indigo-200/50"
                           : "hover:bg-white shadow-sm"
                       }`}
                     >
@@ -3901,7 +5176,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={submitRenameGroup}
-                  className="flex-1 py-3 bg-blue-600 text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-100"
+                  className="flex-1 py-3 bg-indigo-500 text-white font-bold rounded-xl transition-colors shadow-lg shadow-blue-100"
                 >
                   Lưu thay đổi
                 </button>
@@ -3911,11 +5186,58 @@ export default function App() {
         </div>
       )}
 
+      {/* --- MODAL NHẬP MÃ THAM GIA NHÓM --- */}
+      {isJoinModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4 animate-fade-in">
+          <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden scale-100 animate-scale-up">
+            <div className="p-6">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-xl font-bold text-gray-800">
+                  Tham gia nhóm
+                </h3>
+                <button
+                  onClick={() => setIsJoinModalOpen(false)}
+                  className="p-2 bg-gray-100 rounded-full hover:bg-gray-200 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="mb-6">
+                <label className="block text-xs font-bold text-gray-400 uppercase tracking-widest mb-2">
+                  Mã nhóm (8 ký tự)
+                </label>
+                <input
+                  type="text"
+                  value={joinCodeInput}
+                  onChange={(e) =>
+                    setJoinCodeInput(e.target.value.toUpperCase())
+                  }
+                  className="w-full p-4 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 border border-gray-100 font-black text-gray-700 tracking-widest text-center text-xl uppercase"
+                  placeholder="VD: ABCXYZ12"
+                  autoFocus
+                />
+              </div>
+              <button
+                onClick={() => {
+                  handleJoinGroup(joinCodeInput);
+                  setIsJoinModalOpen(false);
+                  setJoinCodeInput("");
+                }}
+                disabled={!joinCodeInput.trim()}
+                className="w-full py-4 bg-gradient-to-r from-blue-500 to-indigo-600 text-white font-bold rounded-xl transition-all shadow-lg shadow-blue-200 active:scale-95 disabled:opacity-50"
+              >
+                Vào nhóm ngay
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* --- SIDEBAR MỚI (QUẢN LÝ LIST NHÓM) --- */}
       <aside className="hidden md:flex fixed top-0 bottom-0 left-0 w-72 flex-col bg-white border-r border-gray-100 shadow-xl z-20">
         {/* 1. HEADER */}
         <div className="p-6 flex items-center gap-3 border-b border-gray-50 shrink-0">
-          <div className="p-2 bg-blue-600 rounded-xl text-white shadow-lg shadow-blue-200">
+          <div className="p-2 bg-gradient-to-br from-indigo-600 to-violet-500 rounded-xl text-white shadow-lg shadow-indigo-200/50">
             <Wallet size={24} />
           </div>
           <h1 className="font-bold text-xl text-gray-800">Split Money</h1>
@@ -3931,7 +5253,7 @@ export default function App() {
             }}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-bold text-sm ${
               activeTab === "dashboard" && !groupId
-                ? "bg-blue-50 text-blue-600 shadow-sm"
+                ? "bg-violet-50/50 text-indigo-600 shadow-sm"
                 : "text-gray-600 hover:bg-gray-50"
             }`}
           >
@@ -3945,7 +5267,7 @@ export default function App() {
             }}
             className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all font-bold text-sm ${
               activeTab === "people" && !groupId
-                ? "bg-blue-50 text-blue-600 shadow-sm"
+                ? "bg-violet-50/50 text-indigo-600 shadow-sm"
                 : "text-gray-600 hover:bg-gray-50"
             }`}
           >
@@ -3962,20 +5284,28 @@ export default function App() {
             <span>Nhóm của tôi ({myGroups.length})</span>
             <button
               onClick={() => setIsCreateGroupModalOpen(true)}
-              className="text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors"
+              className="text-indigo-600 hover:bg-violet-50/50 p-1 rounded transition-colors"
               title="Tạo nhóm mới"
             >
               <Plus size={16} />
             </button>
           </div>
 
-          {/* Nút Tạo nhóm to (nếu chưa có nhóm nào hoặc muốn nổi bật) */}
-          <button
-            onClick={() => setIsCreateGroupModalOpen(true)}
-            className="w-full py-3 border-2 border-dashed border-gray-300 rounded-xl text-gray-400 font-bold hover:border-blue-400 hover:text-blue-500 hover:bg-blue-50 transition-all flex items-center justify-center gap-2 mb-4"
-          >
-            <Plus size={18} /> Tạo nhóm mới
-          </button>
+          {/* CỤM NÚT: Tạo nhóm & Nhập mã */}
+          <div className="flex gap-2 mb-4 px-2">
+            <button
+              onClick={() => setIsCreateGroupModalOpen(true)}
+              className="flex-1 py-3 border-2 border-dashed border-gray-300 rounded-xl text-gray-400 font-bold hover:border-rose-400 hover:text-rose-500 hover:bg-rose-50 transition-all flex items-center justify-center gap-1 text-sm"
+            >
+              <Plus size={16} /> Tạo
+            </button>
+            <button
+              onClick={() => setIsJoinModalOpen(true)}
+              className="flex-1 py-3 border-2 border-dashed border-gray-300 rounded-xl text-gray-400 font-bold hover:border-blue-400 hover:text-blue-500 hover:bg-blue-50 transition-all flex items-center justify-center gap-1 text-sm"
+            >
+              <QrCode size={16} /> Nhập mã
+            </button>
+          </div>
 
           {/* Render List Nhóm */}
           {[...myGroups].reverse().map((g) => (
@@ -3988,31 +5318,23 @@ export default function App() {
               }}
               className={`w-full p-3 rounded-xl flex items-center gap-3 transition-all text-left group relative ${
                 groupId === g.id
-                  ? "bg-blue-600 text-white shadow-md shadow-blue-200"
+                  ? "bg-rose-600 text-white shadow-md shadow-rose-200"
                   : "hover:bg-gray-50 text-gray-700"
               }`}
             >
-              {/* Icon chữ cái đầu tên nhóm */}
               <div
                 className={`w-10 h-10 rounded-lg flex items-center justify-center font-bold text-lg shrink-0 transition-colors ${
                   groupId === g.id
                     ? "bg-white/20 text-white"
-                    : "bg-blue-100 text-blue-600 group-hover:bg-white group-hover:shadow-sm"
+                    : "bg-blue-100 text-rose-600 group-hover:bg-white group-hover:shadow-sm"
                 }`}
               >
-                {/* [FIX 3] Ưu tiên hiện icon, nếu không có mới hiện chữ cái đầu */}
                 {g.icon ? g.icon : g.name?.charAt(0).toUpperCase()}
               </div>
 
               <div className="overflow-hidden flex-1">
-                <p className="font-bold truncate text-sm">{g.name}</p>
-                <p
-                  className={`text-[10px] truncate ${
-                    groupId === g.id ? "text-blue-100" : "text-gray-400"
-                  }`}
-                >
-                  ID: {g.id}
-                </p>
+                {/* ĐÃ LÀM ĐẬM CHỮ VÀ TĂNG SIZE LÊN text-base */}
+                <p className="font-black truncate text-base">{g.name}</p>
               </div>
 
               {/* --- CỤM NÚT SỬA/XÓA --- */}
@@ -4024,7 +5346,7 @@ export default function App() {
                       e.stopPropagation();
                       setSharingGroup(g);
                     }}
-                    className="p-1.5 hover:bg-blue-500 rounded-md cursor-pointer text-white transition-colors"
+                    className="p-1.5 hover:bg-violet-50/500 rounded-md cursor-pointer text-white transition-colors"
                     title="Mã QR"
                   >
                     <QrCode size={14} />
@@ -4062,7 +5384,7 @@ export default function App() {
                         e.stopPropagation();
                         handleLeaveGroup(g.id);
                       }}
-                      className="p-1.5 hover:bg-orange-500 rounded-md cursor-pointer text-white transition-colors"
+                      className="p-1.5 hover:bg-amber-50/500 rounded-md cursor-pointer text-white transition-colors"
                       title="Rời khỏi nhóm này"
                     >
                       <LogOut size={14} />
@@ -4087,7 +5409,7 @@ export default function App() {
           <div className="px-4 pb-2 shrink-0">
             <button
               onClick={openAddModal}
-              className="w-full py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-xl font-bold shadow-lg shadow-blue-200 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2"
+              className="w-full py-3 bg-gradient-to-r from-indigo-600 to-violet-500 text-white rounded-xl font-bold shadow-lg shadow-indigo-200/50 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2"
             >
               <Plus size={20} /> Thêm Giao Dịch
             </button>
@@ -4143,14 +5465,14 @@ export default function App() {
         {/* Chỉ render khi là Mobile */}
         {isMobileView && (
           <div className="md:hidden flex flex-col h-full bg-gray-50">
-            {/* 1. HEADER MOBILE (Dynamic: Global hoặc Group) */}
-            <div className="bg-gradient-to-br from-blue-600 to-indigo-700 px-6 pt-16 pb-20 shrink-0 text-white shadow-md z-20 rounded-b-[2rem] relative overflow-hidden">
-              {/* Background Decor */}
-              <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
+            {/* 1. HEADER MOBILE (Nền hồng) */}
+            <div className="bg-gradient-to-br from-indigo-600 to-violet-500 px-5 pt-14 pb-16 shrink-0 text-white rounded-b-[3rem] shadow-sm relative z-20 overflow-hidden">
+              {/* Bóng mờ */}
+              <div className="absolute top-[-40px] right-[-20px] w-48 h-48 bg-white/15 rounded-full blur-3xl pointer-events-none"></div>
+              <div className="absolute bottom-[-20px] left-[-20px] w-32 h-32 bg-white/10 rounded-full blur-2xl pointer-events-none"></div>
 
               <div className="flex justify-between items-center mb-6 relative z-10">
                 <div className="flex items-center gap-3">
-                  {/* Nếu đang trong nhóm -> Hiện nút Back ra Global */}
                   {groupId ? (
                     <button
                       onClick={() => {
@@ -4158,38 +5480,31 @@ export default function App() {
                         setIsGroupMode(false);
                         setActiveTab("dashboard");
                       }}
-                      className="p-2 bg-white/20 backdrop-blur-md rounded-xl hover:bg-white/30 transition-colors"
+                      className="p-2.5 bg-black/10 backdrop-blur-md rounded-full"
                     >
-                      <ChevronLeft size={20} />
+                      <ChevronLeft size={22} />
                     </button>
                   ) : (
-                    <div className="p-2 bg-white/20 backdrop-blur-md rounded-xl">
-                      <Wallet size={20} />
+                    <div className="p-2.5 bg-white/20 backdrop-blur-md rounded-2xl border border-white/20">
+                      <Wallet size={22} />
                     </div>
                   )}
-
                   <div className="flex flex-col">
-                    <span className="font-bold text-xl tracking-tight leading-none">
+                    <span className="font-bold text-lg tracking-wide">
                       {groupId
                         ? myGroups.find((g) => g.id === groupId)?.name
-                        : "Ví Nhóm"}
+                        : "Ví Split Money"}
                     </span>
-                    {groupId && (
-                      <span className="text-[10px] opacity-70 font-mono">
-                        ID: {groupId}
-                      </span>
-                    )}
                   </div>
                 </div>
 
-                {/* Avatar User (Góc phải) */}
                 <div
                   onClick={
                     user
                       ? () => setIsProfileOpen(true)
                       : () => setIsLoginModalOpen(true)
                   }
-                  className="w-10 h-10 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border border-white/10 cursor-pointer overflow-hidden active:scale-95 transition-transform"
+                  className="w-11 h-11 bg-white/20 backdrop-blur-md rounded-full flex items-center justify-center border-2 border-white/30 cursor-pointer overflow-hidden shadow-sm shrink-0"
                 >
                   {user ? (
                     user.photoURL ? (
@@ -4208,36 +5523,52 @@ export default function App() {
                   )}
                 </div>
               </div>
-              {/* HEADER STATS MOBILE (Chỉ hiện ở Tab Dashboard) */}
+
               {activeTab === "dashboard" && (
-                <div className="relative z-10 animate-fade-in mt-2">
-                  <p className="text-blue-100 text-xs font-bold uppercase tracking-wider opacity-80">
-                    {groupId ? "Tài sản ròng (Nhóm này)" : "Tổng tài sản ròng"}
+                <div className="relative z-10 text-center animate-fade-in mt-2 mb-2">
+                  <p className="text-rose-100 text-[11px] font-bold uppercase tracking-widest opacity-90 mb-1">
+                    {groupId ? "Tổng tài sản nhóm" : "Tổng tài sản ròng"}
                   </p>
-                  <h2
-                    className="font-bold mt-1 tracking-tighter truncate"
-                    // Logic chỉnh size chữ động: Dài quá thì giảm size
-                    style={{
-                      fontSize:
-                        displayNetBalance.toString().length > 9
-                          ? "2rem"
-                          : "2.5rem",
-                    }}
-                  >
-                    {/* [FIX] Dùng biến displayNetBalance mới */}
+                  <h2 className="font-bold text-4xl tracking-tight drop-shadow-md">
                     {formatCompactCurrency(displayNetBalance)}
                   </h2>
-                  {/* Hiển thị số nhỏ chi tiết bên dưới nếu cần thiết */}
-                  <p className="text-blue-200 text-xs font-mono opacity-60 truncate">
-                    {/* [FIX] Dùng biến displayNetBalance mới */}
-                    {formatCurrency(displayNetBalance)}
-                  </p>
                 </div>
               )}
             </div>
+            {/* --- KẾT THÚC THẺ NỀN HỒNG --- */}
 
-            {/* 2. BODY CONTENT (Đẩy lên đè vào Header) */}
-            <div className="flex-1 flex flex-col min-h-0 -mt-12 z-30 px-4 pb-24 overflow-hidden">
+            {/* 1.5 FLOATING CARD (Đã rút ra ngoài để không bao giờ bị cắt viền) */}
+            {activeTab === "dashboard" && (
+              <div className="px-5 relative z-30 -mt-10 mb-4 animate-slide-up">
+                <div className="bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.08)] p-5 flex justify-between items-center">
+                  <div className="flex-1 flex flex-col items-center border-r border-gray-100">
+                    <div className="w-8 h-8 rounded-full bg-teal-50 flex items-center justify-center mb-1">
+                      <TrendingUp size={16} className="text-teal-600" />
+                    </div>
+                    <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5">
+                      Tiền thu về
+                    </p>
+                    <p className="text-teal-600 font-extrabold text-lg">
+                      {formatCompactCurrency(displayReceivable)}
+                    </p>
+                  </div>
+                  <div className="flex-1 flex flex-col items-center">
+                    <div className="w-8 h-8 rounded-full bg-amber-50/50 flex items-center justify-center mb-1">
+                      <TrendingDown size={16} className="text-orange-500" />
+                    </div>
+                    <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5">
+                      Tiền phải trả
+                    </p>
+                    <p className="text-orange-600 font-extrabold text-lg">
+                      {formatCompactCurrency(displayPayable)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 2. BODY CONTENT */}
+            <div className="flex-1 flex flex-col min-h-0 z-30 px-4 pb-24 overflow-hidden pt-2">
               {/* ========================================================
                 TRƯỜNG HỢP 1: GLOBAL VIEW (KHÔNG CÓ GROUP)
                 ======================================================== */}
@@ -4247,44 +5578,112 @@ export default function App() {
                   <div className="bg-white rounded-[2rem] shadow-lg h-full flex flex-col overflow-hidden animate-slide-up">
                     <div className="p-6 border-b border-gray-100">
                       <h3 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                        <Users className="text-blue-600" size={20} /> Danh bạ
+                        <Users className="text-indigo-600" size={20} /> Danh bạ
                         của tôi
                       </h3>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
-                      {/* Form thêm bạn nhanh */}
-                      <div className="bg-blue-50 p-4 rounded-2xl mb-4 border border-blue-100">
-                        <p className="text-xs font-bold text-blue-800 mb-2 uppercase">
-                          Thêm liên hệ mới
-                        </p>
-
-                        {/* --- SỬA DÒNG NÀY --- */}
-                        <div className="flex flex-col gap-3 mb-3">
-                          {" "}
-                          {/* Đổi thành flex-col để xếp dọc */}
-                          <input
-                            value={newPersonName}
-                            onChange={(e) => setNewPersonName(e.target.value)}
-                            placeholder="Tên (VD: GDragon)"
-                            className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none" // Tăng padding lên p-3 cho dễ bấm
-                          />
-                          <input
-                            value={newPersonEmail}
-                            onChange={(e) => setNewPersonEmail(e.target.value)}
-                            placeholder="Email (để Buzz)..."
-                            className="w-full p-3 rounded-xl border border-blue-200 text-sm outline-none"
-                          />
+                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-50/50 shadow-[inset_0_4px_20px_rgba(0,0,0,0.02)]">
+                      {/* Form tìm & thêm danh bạ (ĐÃ CẬP NHẬT) */}
+                      <div className="bg-violet-50/50 p-4 rounded-2xl mb-4 border border-blue-100 space-y-4">
+                        {/* Mục 1: Thêm nhanh không cần Email */}
+                        <div>
+                          <p className="text-xs font-bold text-indigo-700 mb-2 uppercase">
+                            Thêm nhanh (Không cần Email)
+                          </p>
+                          <div className="flex gap-2">
+                            <input
+                              value={newLocalContactName}
+                              onChange={(e) =>
+                                setNewLocalContactName(e.target.value)
+                              }
+                              placeholder="Nhập tên (VD: Gdragon)..."
+                              className="flex-1 p-3 rounded-xl border border-violet-100 text-sm outline-none focus:ring-2 ring-gray-200"
+                            />
+                            <button
+                              onClick={handleAddLocalContact}
+                              className="px-4 py-3 bg-violet-400 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-transform shrink-0"
+                            >
+                              Thêm ngay
+                            </button>
+                          </div>
                         </div>
-                        {/* ------------------- */}
 
-                        <button
-                          onClick={addToContacts}
-                          className="w-full py-3 bg-blue-600 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-transform"
-                        >
-                          + Thêm vào danh bạ
-                        </button>
+                        <hr className="border-violet-100/50" />
+
+                        {/* Mục 2: Kết bạn qua Email (Đồng bộ tài khoản thật) */}
+                        <div>
+                          <p className="text-xs font-bold text-indigo-700 mb-2 uppercase">
+                            Kết bạn qua Email
+                          </p>
+                          <div className="flex gap-2">
+                            <input
+                              value={newPersonEmail}
+                              onChange={(e) =>
+                                setNewPersonEmail(e.target.value)
+                              }
+                              placeholder="Nhập email bạn bè..."
+                              className="flex-1 p-3 rounded-xl border border-violet-100 text-sm outline-none focus:ring-2 ring-gray-200"
+                            />
+                            <button
+                              onClick={sendFriendRequest}
+                              className="px-4 py-3 bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-transform shrink-0"
+                            >
+                              Gửi lời mời
+                            </button>
+                          </div>
+                        </div>
                       </div>
+
+                      {/* KHU VỰC HIỂN THỊ LỜI MỜI KẾT BẠN */}
+                      {friendRequests?.length > 0 && (
+                        <div className="mb-6">
+                          <p className="text-xs font-bold text-orange-600 uppercase mb-3 flex items-center gap-2">
+                            <Bell size={16} className="animate-bounce" /> Lời
+                            mời kết bạn ({friendRequests.length})
+                          </p>
+                          <div className="space-y-3">
+                            {friendRequests.map((req) => (
+                              <div
+                                key={req.id}
+                                className="flex items-center gap-3 p-3 bg-amber-50/50 rounded-2xl border border-orange-100"
+                              >
+                                {req.photoURL ? (
+                                  <img
+                                    src={req.photoURL}
+                                    alt={req.name}
+                                    className="w-10 h-10 rounded-full object-cover shrink-0"
+                                  />
+                                ) : (
+                                  <Avatar name={req.name} size="md" />
+                                )}
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-bold text-gray-800 text-sm truncate">
+                                    {req.name}
+                                  </p>
+                                  <p className="text-xs text-gray-500 truncate">
+                                    {req.email}
+                                  </p>
+                                </div>
+                                <div className="flex gap-2 shrink-0">
+                                  <button
+                                    onClick={() => handleAcceptRequest(req)}
+                                    className="px-3 py-1.5 bg-indigo-500 text-white text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                                  >
+                                    Chấp nhận
+                                  </button>
+                                  <button
+                                    onClick={() => handleDeclineRequest(req.id)}
+                                    className="px-3 py-1.5 bg-gray-200 text-gray-600 text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                                  >
+                                    Xóa
+                                  </button>
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
 
                       {/* List Contacts */}
                       <div className="space-y-3">
@@ -4296,9 +5695,18 @@ export default function App() {
                           contacts.map((c) => (
                             <div
                               key={c.id}
-                              className="flex items-center gap-3 p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-blue-200 transition-all group"
+                              className="flex items-center gap-3 p-3 bg-gray-50 rounded-2xl border border-transparent hover:border-violet-100 transition-all group"
                             >
-                              <Avatar name={c.name} size="md" />
+                              {/* [SỬA]: Ưu tiên hiển thị ảnh thật nếu có */}
+                              {c.photoURL ? (
+                                <img
+                                  src={c.photoURL}
+                                  alt={c.name}
+                                  className="w-10 h-10 rounded-full object-cover border border-gray-200 shrink-0"
+                                />
+                              ) : (
+                                <Avatar name={c.name} size="md" />
+                              )}
                               <div className="flex-1 min-w-0">
                                 <p className="font-bold text-gray-800 text-sm truncate">
                                   {c.name}
@@ -4313,13 +5721,38 @@ export default function App() {
                                   </p>
                                 )}
                               </div>
-                              {/* Nút Sửa (MỚI) */}
-                              <button
-                                onClick={() => setEditingContact(c)}
-                                className="p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm border border-gray-100"
-                              >
-                                <Edit2 size={16} />
-                              </button>
+                              {/* CỤM NÚT QUẢN LÝ (SỬA, XÓA, HỢP NHẤT, UNFRIEND) */}
+                              <div className="flex gap-2">
+                                {!c.email ? (
+                                  // Nút Link cho người Ảo
+                                  <button
+                                    onClick={() => setMergingContact(c)}
+                                    className="p-2 bg-violet-50 text-indigo-600 hover:bg-indigo-100 rounded-lg shadow-sm border border-indigo-100 flex items-center gap-1 text-[10px] font-bold"
+                                  >
+                                    <Link size={14} /> Liên kết
+                                  </button>
+                                ) : (
+                                  // Nút Unfriend cho bạn Thật
+                                  <button
+                                    onClick={() => handleUnfriend(c.id)}
+                                    className="p-2 bg-violet-50/50 text-indigo-600 hover:bg-rose-100 rounded-lg shadow-sm border border-rose-100 flex items-center gap-1 text-[10px] font-bold"
+                                  >
+                                    <UserMinus size={14} /> Hủy KB
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => setEditingContact(c)}
+                                  className="p-2 bg-white text-gray-400 hover:text-indigo-600 rounded-lg shadow-sm border border-gray-100"
+                                >
+                                  <Edit2 size={16} />
+                                </button>
+                                <button
+                                  onClick={() => handleDeleteContact(c.id)}
+                                  className="p-2 bg-white text-gray-400 hover:text-red-500 rounded-lg shadow-sm border border-gray-100"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
                             </div>
                           ))
                         )}
@@ -4335,12 +5768,22 @@ export default function App() {
                         <h3 className="font-bold text-gray-700 text-sm uppercase">
                           Nhóm của tôi
                         </h3>
-                        <button
-                          onClick={() => setIsCreateGroupModalOpen(true)}
-                          className="text-blue-600 bg-blue-50 p-1.5 rounded-lg"
-                        >
-                          <Plus size={16} />
-                        </button>
+                        <div className="flex gap-2">
+                          {/* NÚT NHẬP MÃ TRÊN MOBILE */}
+                          <button
+                            onClick={() => setIsJoinModalOpen(true)}
+                            className="text-blue-600 bg-blue-50 hover:bg-blue-100 px-3 py-1.5 rounded-lg text-xs font-bold transition-colors flex items-center gap-1 shadow-sm active:scale-95"
+                          >
+                            <QrCode size={14} /> Nhập mã
+                          </button>
+                          {/* NÚT TẠO NHÓM */}
+                          <button
+                            onClick={() => setIsCreateGroupModalOpen(true)}
+                            className="text-rose-600 bg-rose-50 hover:bg-rose-100 p-1.5 rounded-lg transition-colors shadow-sm active:scale-95"
+                          >
+                            <Plus size={16} />
+                          </button>
+                        </div>
                       </div>
 
                       {myGroups.length === 0 ? (
@@ -4362,21 +5805,20 @@ export default function App() {
                                   setIsGroupMode(true);
                                   setActiveTab("dashboard");
                                 }}
-                                className="min-w-full snap-center flex items-center gap-3 p-3 active:bg-blue-50 transition-colors bg-white"
+                                className="min-w-full snap-center flex items-center gap-3 p-3 active:bg-violet-50/50 transition-colors bg-white"
                               >
-                                <div className="w-10 h-10 rounded-xl bg-blue-100 text-blue-600 flex items-center justify-center font-bold shrink-0">
+                                <div className="w-10 h-10 rounded-xl bg-violet-100 text-indigo-600 flex items-center justify-center font-bold shrink-0">
                                   {/* [FIX 4] Thêm logic hiển thị icon */}
                                   {g.icon
                                     ? g.icon
                                     : g.name?.charAt(0).toUpperCase()}
                                 </div>
                                 <div className="flex-1 min-w-0">
-                                  <p className="font-bold text-gray-800 text-sm truncate">
+                                  {/* ĐÃ TĂNG SIZE LÊN text-base VÀ IN ĐẬM font-black */}
+                                  <p className="font-black text-gray-800 text-base truncate">
                                     {g.name}
                                   </p>
-                                  <p className="text-[10px] text-gray-400 font-mono">
-                                    ID: {g.id}
-                                  </p>
+                                  {/* ĐÃ XÓA DÒNG HIỂN THỊ ID Ở ĐÂY */}
                                 </div>
                                 {/* Mũi tên gợi ý vuốt */}
                                 <div className="text-gray-300 animate-pulse pl-2">
@@ -4430,8 +5872,8 @@ export default function App() {
                               <span
                                 className={`font-bold text-sm ${
                                   item.amount >= 0
-                                    ? "text-emerald-600"
-                                    : "text-rose-600"
+                                    ? "text-teal-600"
+                                    : "text-indigo-600"
                                 }`}
                               >
                                 {item.amount >= 0 ? "+" : ""}
@@ -4466,10 +5908,10 @@ export default function App() {
                     </button>
                   </div>
 
-                  <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                  <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-50/50 shadow-[inset_0_4px_20px_rgba(0,0,0,0.02)]">
                     {/* Khu vực thêm từ danh bạ */}
-                    <div className="bg-indigo-50 p-4 rounded-2xl mb-6 border border-indigo-100">
-                      <p className="text-xs font-bold text-indigo-800 mb-3 uppercase flex items-center gap-1">
+                    <div className="bg-violet-50 p-4 rounded-2xl mb-6 border border-indigo-100">
+                      <p className="text-xs font-bold text-violet-700 mb-3 uppercase flex items-center gap-1">
                         <Plus size={14} /> Thêm từ danh bạ
                       </p>
 
@@ -4515,7 +5957,19 @@ export default function App() {
                           className="flex justify-between items-center p-3 bg-gray-50 rounded-xl"
                         >
                           <div className="flex items-center gap-3">
-                            <Avatar name={p.name} size="md" />
+                            {p.photoURL ? (
+                              <img
+                                src={p.photoURL}
+                                alt={p.name}
+                                className="w-10 h-10 rounded-full object-cover shadow-sm border border-gray-100 shrink-0"
+                              />
+                            ) : (
+                              <Avatar
+                                name={p.name}
+                                src={p.photoURL}
+                                size="md"
+                              />
+                            )}
                             <div>
                               <p className="font-bold text-gray-800 text-sm">
                                 {p.name}
@@ -4547,7 +6001,7 @@ export default function App() {
                       </p>
                       <button
                         onClick={handleShareGroup}
-                        className="mt-3 text-blue-600 text-xs font-bold flex items-center justify-center gap-1 w-full"
+                        className="mt-3 text-indigo-600 text-xs font-bold flex items-center justify-center gap-1 w-full"
                       >
                         <Share2 size={12} /> Chia sẻ mã này
                       </button>
@@ -4580,6 +6034,7 @@ export default function App() {
                       {/* Debt Cards */}
                       {sortedPeople
                         .filter((p) => p.id !== user?.uid) // Lọc bỏ chính mình
+                        .filter((p) => calculateNetDebt(p.id) !== 0) // [SỬA MỚI]: Ẩn những người không có nợ nần gì với TÔI
                         .map((p) => {
                           const debt = calculateNetDebt(p.id);
                           return (
@@ -4595,7 +6050,7 @@ export default function App() {
                                     e.stopPropagation();
                                     handleSettleAll(p);
                                   }}
-                                  className="absolute top-1 left-1 p-1.5 bg-emerald-50 text-emerald-600 rounded-full shadow-sm z-10"
+                                  className="absolute top-1 left-1 p-1.5 bg-teal-50 text-teal-600 rounded-full shadow-sm z-10"
                                 >
                                   <Check size={12} strokeWidth={3} />
                                 </button>
@@ -4614,7 +6069,19 @@ export default function App() {
                                 </button>
                               )}
 
-                              <Avatar name={p.name} size="md" />
+                              {p.photoURL ? (
+                                <img
+                                  src={p.photoURL}
+                                  alt={p.name}
+                                  className="w-10 h-10 rounded-full object-cover shadow-sm border border-gray-100 shrink-0"
+                                />
+                              ) : (
+                                <Avatar
+                                  name={p.name}
+                                  src={p.photoURL}
+                                  size="md"
+                                />
+                              )}
                               <div className="text-center w-full">
                                 <p className="font-bold text-gray-800 text-xs truncate w-full mb-1">
                                   {p.name}
@@ -4622,8 +6089,8 @@ export default function App() {
                                 <span
                                   className={`text-[10px] font-extrabold px-2 py-0.5 rounded-lg ${
                                     debt >= 0
-                                      ? "bg-emerald-50 text-emerald-600"
-                                      : "bg-rose-50 text-rose-600"
+                                      ? "bg-teal-50 text-teal-600"
+                                      : "bg-violet-50/50 text-indigo-600"
                                   }`}
                                 >
                                   {formatCurrency(Math.abs(debt))}
@@ -4644,7 +6111,7 @@ export default function App() {
                       </h3>
                       <button
                         onClick={() => setIsHistoryModalOpen(true)}
-                        className="text-blue-600 text-xs font-bold flex items-center gap-1"
+                        className="text-indigo-600 text-xs font-bold flex items-center gap-1"
                       >
                         Xem tất cả <ChevronRight size={12} />
                       </button>
@@ -4654,13 +6121,35 @@ export default function App() {
                     <div className="flex-1 overflow-y-auto custom-scrollbar">
                       {expenses.length === 0 ? (
                         <div className="text-center py-10 text-gray-300 flex flex-col items-center">
-                          <History size={32} className="mb-2 opacity-50" />
-                          <span className="text-xs">Chưa có giao dịch</span>
+                          <motion.div
+                            initial={{ opacity: 0, scale: 0.8 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            className="h-full flex flex-col items-center justify-center text-center p-6"
+                          >
+                            <div className="text-6xl mb-4 animate-bounce">
+                              👻
+                            </div>
+                            <h3 className="font-bold text-gray-700 text-lg mb-1">
+                              Trống trơn!
+                            </h3>
+                            <p className="text-sm text-gray-400">
+                              Chưa có khoản chi nào. Đi ăn chè đi rồi nhập vào
+                              đây nha!
+                            </p>
+                          </motion.div>
                         </div>
                       ) : (
                         <div className="space-y-3 pb-2">
                           {/* Thêm pb-2 để item cuối không bị sát mép dưới quá */}
                           {expenses
+                            .filter(
+                              (exp) =>
+                                exp.payerId === user?.uid ||
+                                exp.sharedWith.includes(user?.uid),
+                            )
+                            .sort(
+                              (a, b) => new Date(b.date) - new Date(a.date),
+                            ) /* <--- THÊM DÒNG NÀY ĐỂ XẾP GẦN NHẤT LÊN ĐẦU */
                             .slice(0, 50)
                             .map((exp) => renderHistoryItem(exp, true))}
                         </div>
@@ -4689,7 +6178,11 @@ export default function App() {
                     if (!p) return null;
                     const debt = calculateNetDebt(p.id);
                     const related = expenses.filter(
-                      (e) => e.sharedWith.includes(p.id) || e.payerId === p.id,
+                      (e) =>
+                        (e.payerId === user?.uid &&
+                          e.sharedWith.includes(p.id)) ||
+                        (e.payerId === p.id &&
+                          e.sharedWith.includes(user?.uid)),
                     );
 
                     return (
@@ -4698,6 +6191,7 @@ export default function App() {
                           <Avatar
                             name={p.name}
                             size="lg"
+                            src={p.photoURL}
                             className="mx-auto mb-3 shadow-lg"
                           />
                           <h2 className="text-2xl font-bold text-gray-800">
@@ -4732,7 +6226,7 @@ export default function App() {
                               </button>
                               <button
                                 onClick={() => handleSettleAll(p)}
-                                className="flex items-center gap-2 px-4 py-2 bg-emerald-500 text-white rounded-xl font-bold shadow-md active:scale-95"
+                                className="flex items-center gap-2 px-4 py-2 bg-teal-500 text-white rounded-xl font-bold shadow-md active:scale-95"
                               >
                                 <Check size={18} /> Xác nhận trả
                               </button>
@@ -4753,15 +6247,15 @@ export default function App() {
               )}
             </div>
 
-            {/* 3. BOTTOM NAVIGATION (Chỉ hiện khi chưa chọn chi tiết member) */}
+            {/* 3. BOTTOM NAVIGATION (Phong cách Super App MoMo) */}
             {!selectedPersonId && (
-              <div className="fixed bottom-0 left-0 right-0 z-50 bg-white border-t border-gray-100 pb-[env(safe-area-inset-bottom)] shadow-[0_-5px_20px_rgba(0,0,0,0.05)]">
-                <div className="flex justify-around items-center h-16 px-6">
+              <div className="fixed bottom-0 left-0 right-0 z-50 bg-white/70 backdrop-blur-2xl border-t border-white/50 pb-[env(safe-area-inset-bottom)] shadow-[0_-20px_40px_rgba(0,0,0,0.03)] supports-[backdrop-filter]:bg-white/50">
+                <div className="flex justify-around items-end h-16 px-6 relative">
                   <button
                     onClick={() => setActiveTab("dashboard")}
-                    className={`flex flex-col items-center gap-1 ${
+                    className={`flex flex-col items-center gap-1 w-16 pb-2 transition-all ${
                       activeTab === "dashboard"
-                        ? "text-blue-600"
+                        ? "text-indigo-600 -translate-y-1"
                         : "text-gray-400"
                     }`}
                   >
@@ -4769,28 +6263,29 @@ export default function App() {
                       size={24}
                       strokeWidth={activeTab === "dashboard" ? 2.5 : 2}
                     />
-                    <span className="text-[10px] font-bold">Trang chủ</span>
+                    <span className="text-[10px] font-bold">Home</span>
                   </button>
 
-                  {/* Nút Add to ở giữa - Chỉ hiện khi CÓ Group (để add giao dịch) */}
-                  {groupId ? (
-                    <div className="relative -top-6">
-                      <button
-                        onClick={openAddModal}
-                        className="w-16 h-16 bg-gradient-to-tr from-blue-500 to-indigo-600 rounded-full shadow-xl shadow-blue-300 text-white flex items-center justify-center active:scale-95 transition-transform border-4 border-gray-50"
-                      >
-                        <Plus size={32} strokeWidth={3} />
-                      </button>
-                    </div>
-                  ) : (
-                    // Nếu Global thì nút giữa là tạo Group (hoặc ẩn đi cho đẹp)
-                    <div className="w-10"></div>
-                  )}
+                  {/* Nút Cộng Nổi (FAB) */}
+                  <div className="relative -top-6 z-50">
+                    <button
+                      onClick={
+                        groupId
+                          ? openAddModal
+                          : () => setIsCreateGroupModalOpen(true)
+                      }
+                      className="w-14 h-14 bg-gradient-to-tr from-indigo-600 to-violet-500 rounded-full text-white flex items-center justify-center active:scale-90 transition-transform border-4 border-white"
+                    >
+                      <Plus size={28} strokeWidth={2.5} />
+                    </button>
+                  </div>
 
                   <button
                     onClick={() => setActiveTab("people")}
-                    className={`flex flex-col items-center gap-1 ${
-                      activeTab === "people" ? "text-blue-600" : "text-gray-400"
+                    className={`flex flex-col items-center gap-1 w-16 pb-2 transition-all ${
+                      activeTab === "people"
+                        ? "text-indigo-600 -translate-y-1"
+                        : "text-gray-400"
                     }`}
                   >
                     <Users
@@ -4798,7 +6293,7 @@ export default function App() {
                       strokeWidth={activeTab === "people" ? 2.5 : 2}
                     />
                     <span className="text-[10px] font-bold">
-                      {groupId ? "Thành viên" : "Danh bạ"}
+                      {groupId ? "Nhóm" : "Friend"}
                     </span>
                   </button>
                 </div>
@@ -4818,40 +6313,145 @@ export default function App() {
                 // >>> 1.1: QUẢN LÝ DANH BẠ (THÊM BẠN MỚI TẠI ĐÂY) <<<
                 <div className="h-full flex flex-col animate-fade-in">
                   <h2 className="text-2xl font-bold text-gray-800 mb-6 flex items-center gap-2">
-                    <Users className="text-blue-600" /> Danh bạ bạn bè
+                    <Users className="text-indigo-600" /> Danh bạ bạn bè
                   </h2>
 
-                  {/* FORM THÊM BẠN VÀO DANH BẠ */}
-                  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 mb-6 flex gap-4 items-end">
-                    <div className="flex-1 space-y-1">
-                      <label className="text-xs font-bold text-gray-500 uppercase">
-                        Tên gợi nhớ
-                      </label>
+                  {/* GIAO DIỆN TÌM KIẾM MẠNG XÃ HỘI */}
+                  <div className="bg-white p-4 rounded-2xl mb-4 border border-gray-200 shadow-sm space-y-4">
+                    {/* 1. Thêm nhanh người ảo */}
+                    <div className="flex gap-2">
                       <input
-                        value={newPersonName}
-                        onChange={(e) => setNewPersonName(e.target.value)}
-                        className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
-                        placeholder="Ví dụ: GDragon..."
+                        value={newLocalContactName}
+                        onChange={(e) => setNewLocalContactName(e.target.value)}
+                        placeholder="Tạo bạn ảo (Không cần Email)..."
+                        className="flex-1 p-3 rounded-xl bg-gray-50 border border-gray-200 text-sm outline-none focus:border-indigo-500"
                       />
+                      <button
+                        onClick={handleAddLocalContact}
+                        className="px-4 py-3 bg-violet-400 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 shrink-0"
+                      >
+                        Tạo
+                      </button>
                     </div>
-                    <div className="flex-1 space-y-1">
-                      <label className="text-xs font-bold text-gray-500 uppercase">
-                        Email (để Buzz)
-                      </label>
+
+                    <hr className="border-gray-100" />
+
+                    {/* 2. Tìm kiếm trên mạng xã hội */}
+                    <form onSubmit={searchNetwork} className="flex gap-2">
                       <input
-                        value={newPersonEmail}
-                        onChange={(e) => setNewPersonEmail(e.target.value)}
-                        className="w-full p-3 bg-gray-50 rounded-xl border border-gray-200 outline-none focus:border-blue-500 transition-colors"
-                        placeholder="example@gmail.com"
+                        value={searchQuery}
+                        onChange={(e) => setSearchQuery(e.target.value)}
+                        placeholder="Tìm kiếm Email hoặc Tên thật..."
+                        className="flex-1 p-3 rounded-xl bg-gray-50 border border-gray-200 text-sm outline-none focus:border-blue-500"
                       />
-                    </div>
-                    <button
-                      onClick={addToContacts}
-                      className="px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg shadow-blue-200 transition-transform active:scale-95"
-                    >
-                      + Thêm vào danh bạ
-                    </button>
+                      <button
+                        type="submit"
+                        className="px-4 py-3 bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 shrink-0"
+                      >
+                        Tìm
+                      </button>
+                    </form>
+
+                    {/* Hiển thị kết quả tìm kiếm */}
+                    {searchResults.length > 0 && (
+                      <div className="mt-4 p-4 bg-violet-50/50/50 rounded-xl border border-blue-100">
+                        <p className="text-xs font-bold text-indigo-700 mb-3 uppercase">
+                          Kết quả tìm kiếm ({searchResults.length})
+                        </p>
+                        <div className="space-y-2">
+                          {searchResults.map((res) => {
+                            const isFriend = contacts.some(
+                              (c) => c.id === res.id,
+                            );
+                            return (
+                              <div
+                                key={res.id}
+                                className="flex items-center gap-3 p-2 bg-white rounded-xl border border-blue-100 shadow-sm"
+                              >
+                                <Avatar
+                                  name={res.name}
+                                  src={res.photoURL}
+                                  size="md"
+                                />
+                                <div className="flex-1 min-w-0">
+                                  <p className="font-bold text-gray-800 text-sm truncate">
+                                    {res.name}
+                                  </p>
+                                  <p className="text-xs text-gray-500 truncate">
+                                    {res.email}
+                                  </p>
+                                </div>
+                                {isFriend ? (
+                                  <span className="text-[10px] font-bold text-gray-400 bg-gray-100 px-2 py-1 rounded">
+                                    Đã kết bạn
+                                  </span>
+                                ) : (
+                                  <button
+                                    onClick={() =>
+                                      handleAddFriendFromSearch(res)
+                                    }
+                                    className="px-3 py-1.5 bg-indigo-500 text-white text-xs font-bold rounded-lg shadow-sm"
+                                  >
+                                    Kết bạn
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                   </div>
+
+                  {/* KHU VỰC HIỂN THỊ LỜI MỜI KẾT BẠN */}
+                  {friendRequests?.length > 0 && (
+                    <div className="mb-6 bg-amber-50/50/50 p-6 rounded-2xl border border-orange-100">
+                      <p className="text-sm font-bold text-orange-600 uppercase mb-4 flex items-center gap-2">
+                        <Bell size={18} className="animate-bounce" /> Lời mời
+                        đang chờ ({friendRequests.length})
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                        {friendRequests.map((req) => (
+                          <div
+                            key={req.id}
+                            className="flex items-center gap-3 p-4 bg-white rounded-2xl border border-orange-200 shadow-sm"
+                          >
+                            {req.photoURL ? (
+                              <img
+                                src={req.photoURL}
+                                alt={req.name}
+                                className="w-12 h-12 rounded-full object-cover shrink-0"
+                              />
+                            ) : (
+                              <Avatar name={req.name} size="md" />
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="font-bold text-gray-800 truncate">
+                                {req.name}
+                              </p>
+                              <p className="text-xs text-gray-500 truncate">
+                                {req.email}
+                              </p>
+                            </div>
+                            <div className="flex flex-col gap-1 shrink-0">
+                              <button
+                                onClick={() => handleAcceptRequest(req)}
+                                className="px-3 py-1.5 bg-indigo-500 text-white text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                              >
+                                Chấp nhận
+                              </button>
+                              <button
+                                onClick={() => handleDeclineRequest(req.id)}
+                                className="px-3 py-1.5 bg-gray-100 text-gray-600 text-xs font-bold rounded-lg shadow-sm active:scale-95"
+                              >
+                                Từ chối
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* LIST DANH BẠ HIỆN CÓ */}
                   <div className="flex-1 bg-white rounded-[2rem] shadow-sm border border-gray-200 overflow-hidden flex flex-col">
@@ -4873,7 +6473,16 @@ export default function App() {
                               key={contact.id}
                               className="flex items-center gap-4 p-4 bg-gray-50 rounded-2xl border border-gray-100 relative group hover:bg-white hover:shadow-md transition-all"
                             >
-                              <Avatar name={contact.name} size="md" />
+                              {/* [SỬA]: Ưu tiên hiển thị ảnh thật nếu có */}
+                              {contact.photoURL ? (
+                                <img
+                                  src={contact.photoURL}
+                                  alt={contact.name}
+                                  className="w-10 h-10 rounded-full object-cover border border-gray-200 shrink-0"
+                                />
+                              ) : (
+                                <Avatar name={contact.name} size="md" />
+                              )}
                               <div className="flex-1 min-w-0">
                                 <h4 className="font-bold text-gray-800 truncate">
                                   {contact.name}
@@ -4890,13 +6499,25 @@ export default function App() {
                               </div>
 
                               {/* Nút Sửa (Hiện khi hover - MỚI) */}
-                              <button
-                                onClick={() => setEditingContact(contact)}
-                                className="absolute top-4 right-4 p-2 bg-white text-gray-400 hover:text-blue-600 rounded-lg shadow-sm opacity-0 group-hover:opacity-100 transition-all hover:scale-110"
-                                title="Sửa thông tin"
-                              >
-                                <Edit2 size={16} />
-                              </button>
+                              {/* Nút Sửa và Xóa (Hiện khi hover - MỚI) */}
+                              <div className="absolute top-4 right-4 opacity-0 group-hover:opacity-100 transition-all flex gap-2">
+                                <button
+                                  onClick={() => setEditingContact(contact)}
+                                  className="p-2 bg-white text-gray-400 hover:text-indigo-600 rounded-lg shadow-sm hover:scale-110 transition-all"
+                                  title="Sửa thông tin"
+                                >
+                                  <Edit2 size={16} />
+                                </button>
+                                <button
+                                  onClick={() =>
+                                    handleDeleteContact(contact.id)
+                                  }
+                                  className="p-2 bg-white text-gray-400 hover:text-red-500 rounded-lg shadow-sm hover:scale-110 transition-all"
+                                  title="Xóa liên hệ"
+                                >
+                                  <Trash2 size={16} />
+                                </button>
+                              </div>
                             </div>
                           ))
                         )}
@@ -4917,37 +6538,52 @@ export default function App() {
                     </div>
                   ) : (
                     <div className="flex-1 overflow-y-auto custom-scrollbar pr-2">
-                      {/* 3 CARD STATS */}
-                      <div className="grid grid-cols-3 gap-6 mb-8">
-                        <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-6 text-white shadow-xl relative overflow-hidden flex flex-col justify-center min-h-[140px]">
-                          <div className="absolute top-[-20px] right-[-20px] w-32 h-32 bg-white/10 rounded-full blur-2xl"></div>
-                          <p className="opacity-80 text-sm font-bold uppercase mb-1 relative z-10">
-                            Tài sản ròng
+                      {/* 3 CARD STATS (Phong cách MoMo Desktop) */}
+                      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                        {/* Thẻ Tài sản ròng */}
+                        <div className="bg-gradient-to-br from-indigo-600 to-violet-500 rounded-3xl p-6 text-white shadow-lg shadow-indigo-200/50 relative overflow-hidden flex flex-col justify-center min-h-[150px]">
+                          <div className="absolute top-[-20px] right-[-20px] w-32 h-32 bg-white/20 rounded-full blur-2xl"></div>
+                          <div className="absolute bottom-[-20px] left-[-20px] w-24 h-24 bg-white/10 rounded-full blur-xl"></div>
+                          <p className="opacity-90 text-sm font-bold uppercase mb-2 relative z-10 flex items-center gap-2">
+                            <Wallet size={16} /> Tài sản ròng
                           </p>
                           <h3
-                            className="text-3xl xl:text-4xl font-bold tracking-tight relative z-10 truncate"
+                            className="text-4xl font-extrabold tracking-tight relative z-10 truncate drop-shadow-md"
                             title={formatCurrency(globalStats.netWorth)}
                           >
                             {formatCompactCurrency(globalStats.netWorth)}
                           </h3>
                         </div>
-                        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex flex-col justify-center min-h-[140px]">
-                          <p className="text-gray-500 font-bold text-sm uppercase mb-1">
-                            Cần thu về
+
+                        {/* Thẻ Cần Thu */}
+                        <div className="bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 flex flex-col justify-center min-h-[150px] relative overflow-hidden group">
+                          <div className="w-10 h-10 rounded-full bg-teal-50 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                            <TrendingUp size={20} className="text-teal-600" />
+                          </div>
+                          <p className="text-gray-400 font-bold text-xs uppercase mb-1">
+                            Tiền nhận về
                           </p>
                           <h3
-                            className="text-2xl xl:text-3xl font-bold text-emerald-600 truncate"
+                            className="text-3xl font-extrabold text-teal-600 truncate"
                             title={formatCurrency(globalStats.totalOwed)}
                           >
                             {formatCompactCurrency(globalStats.totalOwed)}
                           </h3>
                         </div>
-                        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-100 flex flex-col justify-center min-h-[140px]">
-                          <p className="text-gray-500 font-bold text-sm uppercase mb-1">
-                            Cần phải trả
+
+                        {/* Thẻ Cần Trả */}
+                        <div className="bg-white rounded-3xl p-6 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-gray-100 flex flex-col justify-center min-h-[150px] relative overflow-hidden group">
+                          <div className="w-10 h-10 rounded-full bg-amber-50/50 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                            <TrendingDown
+                              size={20}
+                              className="text-orange-500"
+                            />
+                          </div>
+                          <p className="text-gray-400 font-bold text-xs uppercase mb-1">
+                            Tiền phải trả
                           </p>
                           <h3
-                            className="text-2xl xl:text-3xl font-bold text-rose-600 truncate"
+                            className="text-3xl font-extrabold text-orange-600 truncate"
                             title={formatCurrency(globalStats.totalDebt)}
                           >
                             {formatCompactCurrency(globalStats.totalDebt)}
@@ -4973,7 +6609,11 @@ export default function App() {
                                 className="flex justify-between items-center p-3 hover:bg-gray-50 rounded-xl transition-colors border-b border-gray-50 last:border-0"
                               >
                                 <div className="flex items-center gap-3">
-                                  <Avatar name={item.name} size="md" />
+                                  <Avatar
+                                    name={item.name}
+                                    size="md"
+                                    src={item.avatar}
+                                  />
                                   <div>
                                     <p className="font-bold text-gray-800">
                                       {item.name}
@@ -4988,8 +6628,8 @@ export default function App() {
                                 <div
                                   className={`font-bold text-lg ${
                                     item.amount >= 0
-                                      ? "text-emerald-600"
-                                      : "text-rose-600"
+                                      ? "text-teal-600"
+                                      : "text-indigo-600"
                                   }`}
                                 >
                                   {item.amount >= 0 ? "+" : "-"}
@@ -5021,7 +6661,7 @@ export default function App() {
                             {/* Nút Tạo nhóm */}
                             <button
                               onClick={() => setIsCreateGroupModalOpen(true)}
-                              className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg text-xs font-bold hover:bg-blue-100 transition-colors border border-blue-100"
+                              className="flex items-center gap-2 px-3 py-1.5 bg-violet-50/50 text-indigo-600 rounded-lg text-xs font-bold hover:bg-violet-100 transition-colors border border-blue-100"
                             >
                               <Plus size={14} /> Tạo nhóm
                             </button>
@@ -5083,7 +6723,7 @@ export default function App() {
                         onClick={() => setActiveTab("dashboard")}
                         className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
                           activeTab === "dashboard"
-                            ? "bg-white shadow text-blue-600"
+                            ? "bg-white shadow text-indigo-600"
                             : "text-gray-500 hover:text-gray-700"
                         }`}
                       >
@@ -5093,7 +6733,7 @@ export default function App() {
                         onClick={() => setActiveTab("people")}
                         className={`px-5 py-2.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2 ${
                           activeTab === "people"
-                            ? "bg-white shadow text-blue-600"
+                            ? "bg-white shadow text-indigo-600"
                             : "text-gray-500 hover:text-gray-700"
                         }`}
                       >
@@ -5127,7 +6767,10 @@ export default function App() {
                           const debt = calculateNetDebt(p.id);
                           const related = expenses.filter(
                             (e) =>
-                              e.sharedWith.includes(p.id) || e.payerId === p.id,
+                              (e.payerId === user?.uid &&
+                                e.sharedWith.includes(p.id)) ||
+                              (e.payerId === p.id &&
+                                e.sharedWith.includes(user?.uid)),
                           );
                           return (
                             <div className="max-w-3xl mx-auto">
@@ -5191,8 +6834,8 @@ export default function App() {
                     <div className="h-full overflow-y-auto custom-scrollbar">
                       <div className="max-w-4xl mx-auto space-y-8 bg-white p-8 rounded-[2rem] shadow-sm border border-gray-200">
                         {/* KHU VỰC CHỌN TỪ DANH BẠ */}
-                        <div className="bg-blue-50 p-6 rounded-2xl border border-blue-100">
-                          <h3 className="font-bold text-blue-800 mb-4 flex items-center gap-2">
+                        <div className="bg-violet-50/50 p-6 rounded-2xl border border-blue-100">
+                          <h3 className="font-bold text-indigo-700 mb-4 flex items-center gap-2">
                             <Plus size={20} /> Thêm thành viên từ Danh bạ
                           </h3>
 
@@ -5221,7 +6864,7 @@ export default function App() {
                                   <button
                                     key={contact.id}
                                     onClick={() => addContactToGroup(contact)}
-                                    className="flex items-center gap-2 px-4 py-2 bg-white rounded-xl border border-blue-200 shadow-sm hover:shadow-md hover:border-blue-500 hover:text-blue-600 transition-all text-sm font-bold text-gray-700"
+                                    className="flex items-center gap-2 px-4 py-2 bg-white rounded-xl border border-violet-100 shadow-sm hover:shadow-md hover:border-blue-500 hover:text-indigo-600 transition-all text-sm font-bold text-gray-700"
                                   >
                                     <Avatar name={contact.name} size="sm" />
                                     {contact.name}
@@ -5251,7 +6894,19 @@ export default function App() {
                               className="p-4 bg-gray-50 rounded-2xl flex justify-between items-center group hover:bg-white hover:shadow-md transition-all border border-transparent hover:border-gray-100"
                             >
                               <div className="flex items-center gap-4">
-                                <Avatar name={p.name} size="md" />
+                                {p.photoURL ? (
+                                  <img
+                                    src={p.photoURL}
+                                    alt={p.name}
+                                    className="w-10 h-10 rounded-full object-cover shadow-sm border border-gray-100 shrink-0"
+                                  />
+                                ) : (
+                                  <Avatar
+                                    name={p.name}
+                                    src={p.photoURL}
+                                    size="md"
+                                  />
+                                )}
                                 <div>
                                   <div className="font-bold text-lg text-gray-700">
                                     {p.name}
@@ -5288,7 +6943,7 @@ export default function App() {
                             <Users size={18} className="text-blue-500" /> Bảng
                             công nợ
                           </h2>
-                          <div className="flex-1 overflow-y-auto pr-2 custom-scrollbar pb-2">
+                          <div className="flex-1 overflow-y-auto px-2 pt-4 pb-10 -mx-2 custom-scrollbar">
                             <div className="grid grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-3">
                               {/* LỌC BỎ CHÍNH MÌNH (user.uid) KHỎI GRID */}
                               {sortedPeople
@@ -5325,7 +6980,7 @@ export default function App() {
                                             e.stopPropagation();
                                             handleSettleAll(person);
                                           }}
-                                          className="absolute top-2 left-2 text-emerald-600 bg-emerald-50 p-1.5 rounded-full hover:bg-emerald-200 hover:scale-110 transition-all shadow-sm z-10"
+                                          className="absolute top-2 left-2 text-teal-600 bg-teal-50 p-1.5 rounded-full hover:bg-emerald-200 hover:scale-110 transition-all shadow-sm z-10"
                                           title="Xác nhận người này đã trả hết tiền cho tôi"
                                         >
                                           <Check size={14} strokeWidth={3} />
@@ -5335,6 +6990,7 @@ export default function App() {
                                       <Avatar
                                         name={person.name}
                                         size="md"
+                                        src={person.photoURL}
                                         className="mb-2 shadow-sm"
                                       />
                                       <p className="font-bold text-gray-800 text-sm line-clamp-1 w-full px-1">
@@ -5343,8 +6999,8 @@ export default function App() {
                                       <div
                                         className={`mt-1 font-extrabold text-lg tracking-tight ${
                                           debt >= 0
-                                            ? "text-emerald-600"
-                                            : "text-rose-600"
+                                            ? "text-teal-600"
+                                            : "text-indigo-600"
                                         }`}
                                       >
                                         {formatCurrency(Math.abs(debt))}
@@ -5352,8 +7008,8 @@ export default function App() {
                                       <span
                                         className={`text-[9px] font-bold uppercase tracking-wider mt-1 px-1.5 py-0.5 rounded-md ${
                                           debt >= 0
-                                            ? "bg-emerald-50 text-emerald-600"
-                                            : "bg-rose-50 text-rose-600"
+                                            ? "bg-teal-50 text-teal-600"
+                                            : "bg-violet-50/50 text-indigo-600"
                                         }`}
                                       >
                                         {debt >= 0 ? "Nợ tôi" : "Tôi nợ"}
@@ -5365,12 +7021,12 @@ export default function App() {
                               {/* NÚT THÊM THÀNH VIÊN NHANH TRONG GRID */}
                               <div
                                 onClick={() => setActiveTab("people")}
-                                className="bg-gray-50 p-3 rounded-2xl border-2 border-dashed border-gray-300 cursor-pointer hover:border-blue-400 hover:bg-blue-50 transition-all flex flex-col items-center justify-center text-center group min-h-[120px]"
+                                className="bg-gray-50 p-3 rounded-2xl border-2 border-dashed border-gray-300 cursor-pointer hover:border-blue-400 hover:bg-violet-50/50 transition-all flex flex-col items-center justify-center text-center group min-h-[120px]"
                               >
                                 <div className="w-10 h-10 rounded-full bg-white shadow-sm flex items-center justify-center text-gray-400 group-hover:text-blue-500 mb-2 transition-colors">
                                   <Plus size={20} />
                                 </div>
-                                <span className="text-xs font-bold text-gray-400 group-hover:text-blue-600 transition-colors">
+                                <span className="text-xs font-bold text-gray-400 group-hover:text-indigo-600 transition-colors">
                                   Thêm thành viên
                                 </span>
                               </div>
@@ -5379,7 +7035,7 @@ export default function App() {
                         </div>
                         {/* Cột Stats */}
                         <div className="w-full md:w-64 xl:w-72 flex flex-col shrink-0">
-                          <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-2xl p-5 text-white shadow-lg shadow-blue-200/50 relative overflow-hidden h-full flex flex-col justify-center">
+                          <div className="bg-gradient-to-br from-indigo-600 to-violet-500 rounded-2xl p-5 text-white shadow-lg shadow-indigo-200/50/50 relative overflow-hidden h-full flex flex-col justify-center">
                             <div className="absolute top-[-50px] right-[-50px] w-48 h-48 bg-white/10 rounded-full blur-3xl pointer-events-none"></div>
                             <div className="mb-4 text-center md:text-left relative z-10">
                               <p className="opacity-80 font-bold text-xs uppercase tracking-wider mb-1">
@@ -5395,7 +7051,7 @@ export default function App() {
                             </div>
                             <div className="space-y-3 relative z-10">
                               <div className="bg-white/10 p-3 rounded-xl backdrop-blur-md border border-white/10 flex items-center gap-3">
-                                <div className="p-2 bg-emerald-500/20 rounded-lg">
+                                <div className="p-2 bg-teal-500/20 rounded-lg">
                                   <TrendingUp
                                     size={18}
                                     className="text-emerald-300"
@@ -5415,7 +7071,7 @@ export default function App() {
                                 </div>
                               </div>
                               <div className="bg-white/10 p-3 rounded-xl backdrop-blur-md border border-white/10 flex items-center gap-3">
-                                <div className="p-2 bg-rose-500/20 rounded-lg">
+                                <div className="p-2 bg-violet-50/500/20 rounded-lg">
                                   <TrendingDown
                                     size={18}
                                     className="text-rose-300"
@@ -5456,15 +7112,23 @@ export default function App() {
                             </div>
                           </button>
                         </div>
-                        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar">
+                        <div className="flex-1 overflow-y-auto p-4 custom-scrollbar bg-slate-50/50 shadow-[inset_0_4px_20px_rgba(0,0,0,0.02)]">
                           {expenses.length === 0 && (
                             <div className="text-center text-gray-400 mt-10 text-sm">
                               Chưa có giao dịch nào
                             </div>
                           )}
                           {expenses
+                            .filter(
+                              (exp) =>
+                                exp.payerId === user?.uid ||
+                                exp.sharedWith.includes(user?.uid),
+                            )
+                            .sort(
+                              (a, b) => new Date(b.date) - new Date(a.date),
+                            ) /* <--- THÊM DÒNG NÀY ĐỂ XẾP GẦN NHẤT LÊN ĐẦU */
                             .slice(0, 50)
-                            .map((e) => renderHistoryItem(e))}
+                            .map((exp) => renderHistoryItem(exp, true))}
                         </div>
                       </div>
                     </div>
