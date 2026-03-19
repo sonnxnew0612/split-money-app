@@ -8,7 +8,6 @@ on:
 jobs:
   build-ios:
     runs-on: macos-latest
-<<<<<<< HEAD
 
     steps:
       - uses: actions/checkout@v4
@@ -23,23 +22,14 @@ jobs:
           rm -rf package-lock.json node_modules
           npm install
 
-      # --- BƯỚC FIX QUAN TRỌNG: TỰ TẠO FILE Package.swift CHUẨN ---
+      # --- BƯỚC 1: SỬA LỖI BUILD (QUAN TRỌNG) ---
       - name: Fix @capacitor-firebase/authentication Package.swift
         run: |
           cd node_modules/@capacitor-firebase/authentication
-
-          # 1. Tìm tên file .m trong ios/Plugin để loại trừ (tránh lỗi mixed language)
-          # Lệnh này tìm file đuôi .m và lấy tên file
           M_FILE=$(ls ios/Plugin/*.m | xargs basename)
-          echo "Found .m file to exclude: $M_FILE"
-
-          # 2. Tạo file Package.swift hoàn chỉnh
-          # - Thêm dependency Firebase iOS SDK (quan trọng)
-          # - Loại trừ file .m đã tìm thấy ở trên
           cat <<EOF > Package.swift
           // swift-tools-version: 5.9
           import PackageDescription
-
           let package = Package(
               name: "CapacitorFirebaseAuthentication",
               platforms: [.iOS(.v13)],
@@ -67,34 +57,69 @@ jobs:
           )
           EOF
 
-          echo "✅ Created custom Package.swift successfully!"
-          # In ra để kiểm tra
-          cat Package.swift
-      # -----------------------------------------------------------
       - name: Build React App
         run: npm run build
 
       - name: Sync Capacitor
         run: npx cap sync ios
 
-      - name: Link GoogleService-Info.plist to Xcode Project
+      # --- BƯỚC 2: TỰ ĐỘNG SỬA LỖI ĐĂNG NHẬP GMAIL ---
+      # Bước này sẽ lấy mã từ GoogleService-Info.plist và thêm vào Info.plist
+      # để Google biết đường quay lại app sau khi đăng nhập.
+      - name: Configure Info.plist for Google Sign-In
         run: |
           gem install xcodeproj
+          gem install plist
+
           ruby -e '
             require "xcodeproj"
+            require "plist"
+            
+            # ĐƯỜNG DẪN FILE (Dựa trên cấu trúc folder bạn đã gửi)
             project_path = "ios/App/App.xcodeproj"
-            file_name = "GoogleService-Info.plist"
-            file_path = "ios/App/App/GoogleService-Info.plist"
+            # File này chứa thông tin bí mật của Firebase
+            google_plist_path = "ios/App/App/GoogleService-Info.plist" 
+            # File này chứa cấu hình của App
+            info_plist_path = "ios/App/App/Info.plist"
+            
+            # A. ĐẢM BẢO FILE GOOGLE ĐÃ ĐƯỢC THÊM VÀO DỰ ÁN
             project = Xcodeproj::Project.open(project_path)
             group = project.main_group["App"]
-            unless group.files.find { |f| f.path == file_name }
-              file_ref = group.new_file(file_name)
+            unless group.files.find { |f| f.path == "GoogleService-Info.plist" }
+              file_ref = group.new_file("GoogleService-Info.plist")
               target = project.targets.first
               target.add_resources([file_ref])
               project.save
-              puts "Linked #{file_name} successfully!"
+              puts "✅ Đã thêm GoogleService-Info.plist vào Xcode Project"
+            end
+            # B. LẤY MÃ REVERSED_CLIENT_ID VÀ CẤU HÌNH URL SCHEME
+            if File.exist?(google_plist_path)
+              google_data = Plist::parse_xml(google_plist_path)
+              reversed_client_id = google_data["REVERSED_CLIENT_ID"]
+              
+              if reversed_client_id
+                  puts "🔑 Tìm thấy mã: #{reversed_client_id}"
+                  
+                  info_data = Plist::parse_xml(info_plist_path)
+                  info_data["CFBundleURLTypes"] ||= []
+                  
+                  # Kiểm tra xem đã có mã này chưa, chưa có thì thêm vào
+                  unless info_data["CFBundleURLTypes"].any? { |t| t["CFBundleURLSchemes"]&.include?(reversed_client_id) }
+                    info_data["CFBundleURLTypes"] << {
+                      "CFBundleURLSchemes" => [reversed_client_id],
+                      "CFBundleTypeRole" => "Editor"
+                    }
+                    File.open(info_plist_path, "w") { |f| f.write(info_data.to_plist) }
+                    puts "✅ Đã sửa xong lỗi đăng nhập! (Added URL Scheme)"
+                  else
+                    puts "ℹ️ App đã được cấu hình đúng từ trước."
+                  end
+              else
+                  puts "❌ CẢNH BÁO: Không tìm thấy REVERSED_CLIENT_ID trong file GoogleService!"
+              end
             else
-              puts "#{file_name} already exists."
+              puts "❌ LỖI: Bạn chưa upload file GoogleService-Info.plist vào thư mục ios/App/App/"
+              exit 1
             end
           '
 
@@ -114,137 +139,3 @@ jobs:
         with:
           name: SplitMoney-iOS
           path: SplitMoney.ipa
-=======
-    
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Setup Node.js
-      uses: actions/setup-node@v4
-      with:
-        node-version: 18
-        
-    - name: Install Dependencies
-      run: |
-        rm -rf package-lock.json node_modules
-        npm install
-    
-    # --- BƯỚC 1: SỬA LỖI BUILD (QUAN TRỌNG) ---
-    - name: Fix @capacitor-firebase/authentication Package.swift
-      run: |
-        cd node_modules/@capacitor-firebase/authentication
-        M_FILE=$(ls ios/Plugin/*.m | xargs basename)
-        cat <<EOF > Package.swift
-        // swift-tools-version: 5.9
-        import PackageDescription
-        let package = Package(
-            name: "CapacitorFirebaseAuthentication",
-            platforms: [.iOS(.v13)],
-            products: [
-                .library(
-                    name: "CapacitorFirebaseAuthentication",
-                    targets: ["CapacitorFirebaseAuthentication"])
-            ],
-            dependencies: [
-                .package(url: "https://github.com/ionic-team/capacitor-swift-pm.git", from: "6.0.0"),
-                .package(url: "https://github.com/firebase/firebase-ios-sdk.git", from: "10.0.0")
-            ],
-            targets: [
-                .target(
-                    name: "CapacitorFirebaseAuthentication",
-                    dependencies: [
-                        .product(name: "Capacitor", package: "capacitor-swift-pm"),
-                        .product(name: "Cordova", package: "capacitor-swift-pm"),
-                        .product(name: "FirebaseAuth", package: "firebase-ios-sdk")
-                    ],
-                    path: "ios/Plugin",
-                    exclude: ["$M_FILE"]
-                )
-            ]
-        )
-        EOF
-      
-    - name: Build React App
-      run: npm run build
-      
-    - name: Sync Capacitor
-      run: npx cap sync ios
-
-    # --- BƯỚC 2: TỰ ĐỘNG SỬA LỖI ĐĂNG NHẬP GMAIL ---
-    # Bước này sẽ lấy mã từ GoogleService-Info.plist và thêm vào Info.plist
-    # để Google biết đường quay lại app sau khi đăng nhập.
-    - name: Configure Info.plist for Google Sign-In
-      run: |
-        gem install xcodeproj
-        gem install plist
-        
-        ruby -e '
-          require "xcodeproj"
-          require "plist"
-          
-          # ĐƯỜNG DẪN FILE (Dựa trên cấu trúc folder bạn đã gửi)
-          project_path = "ios/App/App.xcodeproj"
-          # File này chứa thông tin bí mật của Firebase
-          google_plist_path = "ios/App/App/GoogleService-Info.plist" 
-          # File này chứa cấu hình của App
-          info_plist_path = "ios/App/App/Info.plist"
-          
-          # A. ĐẢM BẢO FILE GOOGLE ĐÃ ĐƯỢC THÊM VÀO DỰ ÁN
-          project = Xcodeproj::Project.open(project_path)
-          group = project.main_group["App"]
-          unless group.files.find { |f| f.path == "GoogleService-Info.plist" }
-            file_ref = group.new_file("GoogleService-Info.plist")
-            target = project.targets.first
-            target.add_resources([file_ref])
-            project.save
-            puts "✅ Đã thêm GoogleService-Info.plist vào Xcode Project"
-          end
-
-          # B. LẤY MÃ REVERSED_CLIENT_ID VÀ CẤU HÌNH URL SCHEME
-          if File.exist?(google_plist_path)
-            google_data = Plist::parse_xml(google_plist_path)
-            reversed_client_id = google_data["REVERSED_CLIENT_ID"]
-            
-            if reversed_client_id
-                puts "🔑 Tìm thấy mã: #{reversed_client_id}"
-                
-                info_data = Plist::parse_xml(info_plist_path)
-                info_data["CFBundleURLTypes"] ||= []
-                
-                # Kiểm tra xem đã có mã này chưa, chưa có thì thêm vào
-                unless info_data["CFBundleURLTypes"].any? { |t| t["CFBundleURLSchemes"]&.include?(reversed_client_id) }
-                  info_data["CFBundleURLTypes"] << {
-                    "CFBundleURLSchemes" => [reversed_client_id],
-                    "CFBundleTypeRole" => "Editor"
-                  }
-                  File.open(info_plist_path, "w") { |f| f.write(info_data.to_plist) }
-                  puts "✅ Đã sửa xong lỗi đăng nhập! (Added URL Scheme)"
-                else
-                  puts "ℹ️ App đã được cấu hình đúng từ trước."
-                end
-            else
-                puts "❌ CẢNH BÁO: Không tìm thấy REVERSED_CLIENT_ID trong file GoogleService!"
-            end
-          else
-            puts "❌ LỖI: Bạn chưa upload file GoogleService-Info.plist vào thư mục ios/App/App/"
-            exit 1
-          end
-        '
-      
-    - name: Build Archive (xcodebuild)
-      run: |
-        cd ios/App
-        xcodebuild -project App.xcodeproj -scheme App -configuration Release -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGNING_ALLOWED=NO clean build
-        
-    - name: Create IPA manually
-      run: |
-        mkdir -p Payload
-        cp -r ios/App/build/Build/Products/Release-iphoneos/App.app Payload/
-        zip -r SplitMoney.ipa Payload
-        
-    - name: Upload Artifact (IPA)
-      uses: actions/upload-artifact@v4
-      with:
-        name: SplitMoney-iOS
-        path: SplitMoney.ipa
->>>>>>> a182c4838cb86aef730f2d4a0d0802d65f67d463
