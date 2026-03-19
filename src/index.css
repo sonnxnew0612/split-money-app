@@ -110,3 +110,27 @@ button:focus-visible {
     scrollbar-width: none;
   }
 }
+
+/* --- BỘ GIÁP CHỐNG BÓP MÉO UI TRÊN IOS/IPAD --- */
+@supports (-webkit-touch-callout: none) {
+  /* Selector này chỉ chạy trên các thiết bị chạy iOS/iPadOS */
+
+  input,
+  textarea,
+  select {
+    /* Ép cỡ chữ tối thiểu 16px để Safari KHÔNG tự động zoom làm vỡ layout */
+    font-size: 16px !important;
+  }
+
+  /* Fix lỗi các thanh navigation dán đáy (fixed bottom-0) bị bàn phím đẩy lên lơ lửng giữa màn hình */
+  .fixed.bottom-0 {
+    /* Khi bàn phím ảo bật lên, env(safe-area-inset-bottom) tự động tính toán để giao diện không bị hụt chân */
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+/* Đảm bảo toàn app không bị bôi đen text ngoài ý muốn khi chạm/vuốt nhanh */
+body {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
