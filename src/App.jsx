@@ -1021,25 +1021,19 @@ const ExpenseModal = ({
                         symbolSize = "!text-xl pb-1.5";
                       }
 
-                      // Tính độ rộng động theo số lượng ký tự để lừa Safari
+                      // Tính độ rộng động theo số lượng ký tự
                       const inputLen =
                         displayValue.length > 0 ? displayValue.length : 1;
 
                       return (
-                        <div className="flex items-center justify-center font-black text-indigo-600 relative z-10 transition-all duration-300 ease-out w-full overflow-hidden">
-                          <span
-                            className={`${symbolSize} mr-1 text-indigo-400 transition-all duration-300 ease-out shrink-0`}
-                          >
-                            đ
-                          </span>
+                        // Parent div: Thêm relative để làm gốc tọa độ
+                        <div className="relative flex items-center justify-center font-black text-indigo-600 z-10 transition-all duration-300 w-full overflow-hidden min-h-[60px] md:min-h-[80px]">
                           <input
                             type="text"
                             inputMode="numeric"
                             readOnly={form.type === "custom"}
-                            // BỎ w-full, flex-1 đi. Thêm p-0, m-0 và max-w-full
                             className={`bg-transparent outline-none text-center placeholder-indigo-200 caret-indigo-600 transition-all duration-300 p-0 m-0 max-w-full ${textSize}`}
                             style={{
-                              // RỘNG THEO KÝ TỰ: cấp phát chiều rộng chuẩn xác theo từng ký tự (ch)
                               width: `${inputLen * 1.1}ch`,
                               minWidth: "2ch",
                             }}
@@ -1053,6 +1047,12 @@ const ExpenseModal = ({
                               }
                             }}
                           />
+                          {/* CHỮ "đ": Được ghim tuyệt đối (absolute) ra lề phải, cách lề 16px (right-4) */}
+                          <span
+                            className={`absolute right-4 text-indigo-400/60 transition-all duration-300 shrink-0 ${symbolSize}`}
+                          >
+                            đ
+                          </span>
                         </div>
                       );
                     })()}
@@ -7171,9 +7171,10 @@ export default function App() {
                       <button
                         onClick={searchNetwork}
                         disabled={isSearching || !searchQuery.trim()}
-                        className="px-4 py-3 bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 shrink-0 disabled:opacity-50 transition-all"
+                        className="px-4 py-3 bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-sm active:scale-95 transition-all shrink-0 whitespace-nowrap disabled:opacity-50"
                       >
-                        {isSearching ? "Đang tìm..." : "Tìm"}
+                        {/* Sửa ở đây: Xóa điều kiện, chỉ giữ lại chữ "Tìm" */}
+                        Tìm
                       </button>
                     </div>
 
