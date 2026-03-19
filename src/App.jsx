@@ -1003,23 +1003,22 @@ const ExpenseModal = ({
                         : "";
 
                       const displayLen = displayValue.length;
+                      // THÊM DẤU ! VÀO TRƯỚC MỖI CLASS ĐỂ ÉP CHẾT KÍCH THƯỚC TRÊN IOS
+                      let textSize = "!text-5xl md:!text-6xl";
+                      let symbolSize = "!text-2xl pb-2";
 
-                      let textSize = "text-5xl md:text-6xl";
-                      let symbolSize = "text-2xl pb-2";
-
-                      // ĐÃ SỬA LẠI CÁC MỐC: Tăng mốc độ dài lên để số nhỏ không bị co bóp sớm
                       if (displayLen >= 15) {
                         // Tầm 100 tỷ trở lên
-                        textSize = "text-2xl md:text-3xl";
-                        symbolSize = "text-lg pb-0.5";
+                        textSize = "!text-2xl md:!text-3xl";
+                        symbolSize = "!text-lg pb-0.5";
                       } else if (displayLen >= 13) {
                         // Tầm 1 tỷ trở lên
-                        textSize = "text-3xl md:text-4xl";
-                        symbolSize = "text-xl pb-1";
+                        textSize = "!text-3xl md:!text-4xl";
+                        symbolSize = "!text-xl pb-1";
                       } else if (displayLen >= 11) {
                         // Tầm 100 triệu trở lên
-                        textSize = "text-4xl md:text-5xl";
-                        symbolSize = "text-xl pb-1.5";
+                        textSize = "!text-4xl md:!text-5xl";
+                        symbolSize = "!text-xl pb-1.5";
                       }
 
                       // Tính độ rộng động theo số lượng ký tự để lừa Safari
