@@ -134,3 +134,21 @@ body {
   -webkit-tap-highlight-color: transparent;
   -webkit-touch-callout: none;
 }
+
+/* Tắt nháy xám khi chạm vào nút trên iOS */
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Tắt kính lúp bôi đen văn bản cho toàn bộ App (như đã nói ở Turn trước) */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* TUY NHIÊN: Phải mở lại tính năng bôi đen/chọn chữ cho các ô nhập liệu */
+input,
+textarea {
+  user-select: auto;
+  -webkit-user-select: auto;
+}

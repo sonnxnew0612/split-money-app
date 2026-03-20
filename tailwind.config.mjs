@@ -4,7 +4,7 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Quicksand", "sans-serif"], // Đổi toàn bộ app sang Quicksand
+        sans: ["Quicksand", "sans-serif"], // Dòng này ép toàn bộ app dùng font Quicksand
       },
     },
   },
