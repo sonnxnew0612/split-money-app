@@ -6,11 +6,15 @@ import {
   initializeAuth,
   browserLocalPersistence,
 } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import {
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+} from "firebase/firestore";
 import { getStorage } from "firebase/storage";
 
 const firebaseConfig = {
-  // ... giữ nguyên config cũ của bạn ...
   apiKey: "AIzaSyDB_ySp0TnnCzXDrMmSmbP-5PToRhywQuQ",
   authDomain: "split-money-app-ad6b7.firebaseapp.com",
   projectId: "split-money-app-ad6b7",
@@ -19,25 +23,20 @@ const firebaseConfig = {
   appId: "1:403282098425:web:dfa4773f8c49f1602a8a28",
 };
 
-// 1. Khởi tạo App
-const app = initializeApp(firebaseConfig);
+// 1. Khởi tạo App và Export luôn
+export const app = initializeApp(firebaseConfig);
 
-// 2. Khởi tạo Auth với điều kiện kiểm tra thiết bị [FIX QUAN TRỌNG CHO IPHONE]
-let auth;
+// 2. Khởi tạo Auth và Export trực tiếp (Cách này giúp Vite không bao giờ bị lỗi mất export)
+export const auth = Capacitor.isNativePlatform()
+  ? initializeAuth(app, { persistence: browserLocalPersistence })
+  : getAuth(app);
 
-if (Capacitor.isNativePlatform()) {
-  // Nếu là Mobile (iOS/Android): Dùng LocalStorage để tránh lỗi treo IndexedDB
-  auth = initializeAuth(app, {
-    persistence: browserLocalPersistence,
-  });
-} else {
-  // Nếu là Web (Desktop/iPad Safari): Dùng mặc định (IndexedDB)
-  auth = getAuth(app);
-}
+// 3. Khởi tạo Database với Offline Cache siêu tốc và Export
+export const db = initializeFirestore(app, {
+  localCache: persistentLocalCache({
+    tabManager: persistentMultipleTabManager(),
+  }),
+});
 
-// 3. Khởi tạo DB & Storage
-const db = getFirestore(app);
-const storage = getStorage(app);
-
-// 4. Xuất ra để dùng ở các file khác
-export { auth, db, storage };
+// 4. Khởi tạo Storage và Export
+export const storage = getStorage(app);
