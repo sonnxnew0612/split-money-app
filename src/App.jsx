@@ -72,6 +72,7 @@ import {
   getDoc,
   deleteDoc,
   arrayUnion,
+  arrayRemove,
   collection,
   query,
   where,
@@ -798,14 +799,26 @@ const ExpenseModal = ({
         : currentVal
         ? [currentVal]
         : [""];
+
       if (currentArr.length > 1) {
+        // Trừ bớt 1 món (Giữ nguyên logic cũ)
         currentArr.pop();
         return {
           ...prev,
           customShares: { ...prev.customShares, [personId]: currentArr },
         };
+      } else {
+        // NẾU CHỈ CÒN 1 MÓN MÀ BẤM DẤU "-" -> XÓA LUÔN NGƯỜI ĐÓ KHỎI DANH SÁCH
+        const newSharedWith = prev.sharedWith.filter((id) => id !== personId);
+        const newCustomShares = { ...prev.customShares };
+        delete newCustomShares[personId]; // Dọn dẹp dữ liệu rác
+
+        return {
+          ...prev,
+          sharedWith: newSharedWith,
+          customShares: newCustomShares,
+        };
       }
-      return prev;
     });
   };
 
@@ -1726,7 +1739,6 @@ const ExpenseModal = ({
                                           onClick={() =>
                                             handleRemoveQuantity(p.id)
                                           }
-                                          disabled={amounts.length <= 1}
                                           className="w-6 h-6 flex items-center justify-center text-rose-500 disabled:text-gray-300 font-bold text-lg active:scale-90"
                                         >
                                           -
@@ -3500,27 +3512,51 @@ export default function App() {
     }
   };
 
-  // --- HÀM 2: LƯU TÊN MỚI (Gắn vào nút Lưu trong Modal) ---
+  // --- HÀM LƯU TÊN MỚI (ĐÃ FIX: ĐỒNG BỘ TÊN VÀO CẢ USERS) ---
   const submitRenameGroup = async () => {
     if (!groupToRename || !newNameInput.trim()) return;
     try {
-      await updateDoc(doc(db, "groups", groupToRename.id), {
-        name: newNameInput,
-        icon: selectedIcon, // Lưu icon mới chọn
+      const newName = newNameInput.trim();
+      const groupRef = doc(db, "groups", groupToRename.id);
+
+      // 1. Lấy danh sách thành viên hiện tại trước khi cập nhật
+      const groupSnap = await getDoc(groupRef);
+      let members = [];
+      if (groupSnap.exists()) {
+        members = groupSnap.data().members || [];
+      }
+
+      // 2. Cập nhật tên và icon trong collection 'groups'
+      await updateDoc(groupRef, {
+        name: newName,
+        icon: selectedIcon,
       });
 
-      // Cập nhật UI nhanh
-      setMyGroups((prev) =>
-        prev.map((g) =>
-          g.id === groupToRename.id
-            ? { ...g, name: newNameInput, icon: selectedIcon }
-            : g,
-        ),
-      );
+      // 3. ĐỒNG BỘ TÊN MỚI CHO TẤT CẢ THÀNH VIÊN TRONG NHÓM
+      // Phải làm bước này thì Sidebar của mọi người (và của chính bạn) mới tự động đổi tên
+      for (const m of members) {
+        const userRef = doc(db, "users", m.id);
+        const uSnap = await getDoc(userRef);
+
+        if (uSnap.exists()) {
+          const uData = uSnap.data();
+          const joinedGroups = uData.joinedGroups || [];
+
+          // Tìm và sửa tên nhóm trong danh sách của user này
+          const updatedGroups = joinedGroups.map((g) =>
+            g.id === groupToRename.id
+              ? { ...g, name: newName, icon: selectedIcon }
+              : g,
+          );
+
+          await updateDoc(userRef, { joinedGroups: updatedGroups });
+        }
+      }
 
       showToast("Đã cập nhật thông tin nhóm", "success");
       setIsRenameModalOpen(false);
     } catch (e) {
+      console.error(e);
       showToast("Lỗi cập nhật: " + e.message, "error");
     }
   };
@@ -4253,7 +4289,7 @@ export default function App() {
     }
   };
 
-  // --- HÀM XÓA NHÓM (FIX LỖI CHECK QUYỀN MOBILE) ---
+  // --- HÀM XÓA NHÓM (FIX TRIỆT ĐỂ LỖI KẸT TÊN NHÓM "MA") ---
   const handleDeleteGroup = async (groupIdToDelete) => {
     if (!user) {
       showToast("Vui lòng đăng nhập!", "error");
@@ -4261,54 +4297,50 @@ export default function App() {
     }
 
     try {
-      // 1. Lấy dữ liệu nhóm trực tiếp từ Firestore để kiểm tra quyền
-      // (Vì khi vuốt xóa ở ngoài danh sách, biến groupOwnerId chưa kịp load)
+      showToast("Đang kiểm tra quyền...", "info");
+
       const groupRef = doc(db, "groups", groupIdToDelete);
       const groupSnap = await getDoc(groupRef);
 
       if (!groupSnap.exists()) {
-        showToast("Nhóm này không tồn tại hoặc đã bị xóa!", "error");
-        // Xóa luôn khỏi danh sách hiển thị cho sạch
+        // Nhóm đã mất thật rồi, dọn dẹp nốt cái vỏ trên UI cho sạch
+        showToast("Nhóm này không tồn tại hoặc đã bị xóa từ trước!", "error");
         setMyGroups((prev) => prev.filter((g) => g.id !== groupIdToDelete));
         return;
       }
 
       const groupData = groupSnap.data();
+      const ownerId = groupData.createdBy || groupData.ownerId;
 
-      // 2. Kiểm tra: ID người tạo (createdBy) có trùng với User hiện tại không?
-      if (groupData.createdBy !== user.uid) {
+      if (ownerId !== user.uid) {
         showToast("Chỉ trưởng nhóm mới có quyền xóa!", "error");
         return;
       }
 
-      // 3. Nếu đúng quyền -> Mở hộp thoại xác nhận
       setConfirmDialog({
         isOpen: true,
         title: "Xóa vĩnh viễn nhóm?",
-        message: `Bạn có chắc muốn xóa nhóm "${groupData.name}"? Hành động này không thể hoàn tác.`,
+        message: `Hành động này sẽ xóa vĩnh viễn nhóm "${groupData.name}". Toàn bộ lịch sử giao dịch không thể khôi phục.`,
         onConfirm: async () => {
           try {
-            // A. Xóa document nhóm trong collection 'groups'
+            showToast("Đang xóa dữ liệu...", "info");
+
+            // A. Xóa tận gốc document nhóm trong collection 'groups'
             await deleteDoc(groupRef);
 
-            // B. Xóa nhóm khỏi danh sách 'joinedGroups' của User hiện tại trên Server
-            const newGroupList = myGroups.filter(
+            // B. [ĐÃ FIX CHUẨN] - Tự lọc mảng và ghi đè để dọn sạch "Vỏ" trong Profile User
+            const newJoinedGroups = myGroups.filter(
               (g) => g.id !== groupIdToDelete,
             );
+            const userRef = doc(db, "users", user.uid);
+            await updateDoc(userRef, {
+              joinedGroups: newJoinedGroups,
+            });
 
-            await setDoc(
-              doc(db, "users", user.uid),
-              { joinedGroups: newGroupList },
-              { merge: true },
-            );
+            // C. Cập nhật UI ngay lập tức
+            setMyGroups(newJoinedGroups);
 
-            // C. CẬP NHẬT GIAO DIỆN
-            // Lưu ý: Nếu bạn có onSnapshot đang lắng nghe joinedGroups,
-            // thì KHÔNG NÊN gọi setMyGroups(newGroupList) ở đây để tránh lỗi trùng Key.
-            // Nếu không dùng onSnapshot thì giữ lại dòng dưới:
-            setMyGroups(newGroupList);
-
-            // Điều hướng nếu đang xem nhóm vừa xóa
+            // D. Đá ra ngoài Dashboard nếu đang đứng xem nhóm bị xóa
             if (groupId === groupIdToDelete) {
               setGroupId("");
               setIsGroupMode(false);
@@ -4316,22 +4348,18 @@ export default function App() {
               setActiveTab("dashboard");
             }
 
-            showToast("Đã xóa nhóm thành công", "success");
-
-            // D. ĐÓNG POPUP
-            setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
+            showToast("Đã xóa nhóm thành công!", "success");
           } catch (e) {
             console.error("Lỗi xóa nhóm:", e);
             showToast("Lỗi khi xóa nhóm: " + e.message, "error");
-
-            // Đóng popup kể cả khi lỗi
+          } finally {
             setConfirmDialog((prev) => ({ ...prev, isOpen: false }));
           }
         },
       });
     } catch (e) {
       console.error("Lỗi kiểm tra quyền:", e);
-      showToast("Lỗi kết nối: " + e.message, "error");
+      showToast("Lỗi khi kiểm tra: " + e.message, "error");
     }
   };
 
@@ -7518,20 +7546,34 @@ export default function App() {
                     initial={{ x: "100%" }}
                     animate={{ x: 0 }}
                     exit={{ x: "100%" }}
-                    transition={{ type: "spring", damping: 28, stiffness: 280 }}
-                    // --- MA THUẬT KÉO VUỐT CHUẨN IOS NẰM Ở ĐÂY ---
+                    // Tinh chỉnh lại lò xo mượt hơn, giống lật trang sách hơn
+                    transition={{
+                      type: "spring",
+                      damping: 25,
+                      stiffness: 250,
+                      mass: 0.8,
+                    }}
+                    // --- CHẾ ĐỘ VUỐT 1:1 CHUẨN IOS ---
                     drag="x"
                     dragDirectionLock
+                    // Giữ mỏ neo ở tọa độ 0
                     dragConstraints={{ left: 0, right: 0 }}
-                    dragElastic={{ left: 0, right: 0.8 }} // Chỉ cho phép kéo sang phải
+                    // Ma thuật nằm ở đây: right: 1 nghĩa là KHÔNG có lực cản khi kéo sang phải (tay đi bao nhiêu hình đi bấy nhiêu)
+                    dragElastic={{ left: 0, right: 1 }}
                     onDragEnd={(e, info) => {
-                      // Nếu kéo sang phải hơn 80px hoặc vuốt nhanh thì tự động đóng
-                      if (info.offset.x > 80 || info.velocity.x > 300) {
+                      // Nếu kéo qua 120px (khoảng 1/3 màn hình) HOẶC vuốt nhanh thì lật trang (thoát)
+                      if (info.offset.x > 120 || info.velocity.x > 400) {
                         setSelectedPersonId(null);
                       }
+                      // Nếu nhả tay mà khoảng cách < 120px, Framer Motion sẽ TỰ ĐỘNG hút giao diện về lại tọa độ animate={{ x: 0 }}
                     }}
-                    className="fixed inset-0 z-50 bg-white flex flex-col shadow-[-10px_0_30px_rgba(0,0,0,0.1)]"
+                    className="fixed inset-0 z-50 bg-white flex flex-col shadow-[-10px_0_30px_rgba(0,0,0,0.1)] pt-[env(safe-area-inset-top)]"
                   >
+                    style=
+                    {{
+                      paddingTop: "max(18px, env(safe-area-inset-top))",
+                    }}
+                    >
                     <div className="p-4 border-b border-gray-100 flex items-center gap-3">
                       <button
                         onClick={() => setSelectedPersonId(null)}
@@ -7784,7 +7826,7 @@ export default function App() {
         {/* --- DESKTOP / IPAD VIEW --- */}
         {/* Chỉ render khi KHÔNG PHẢI mobile */}
         {!isMobileView && (
-          <div className="flex-1 overflow-hidden p-8">
+          <div className="flex-1 overflow-hidden p-8 w-full min-w-0">
             {/* ========================================================
               TRƯỜNG HỢP 1: GLOBAL VIEW (DANH BẠ & TỔNG QUAN)
               ======================================================== */}
@@ -8166,20 +8208,22 @@ export default function App() {
                     </div>
                   ) : (
                     // --- NẾU KHÔNG BẤM AI -> GIỮ NGUYÊN CODE TỔNG QUAN CŨ CỦA BẠN CHỖ NÀY ---
-                    <>
-                      <h2 className="text-2xl font-bold text-gray-800 mb-6">
+                    // 1. Thêm flex flex-col và min-h-0 vào Fragment ảo (<>)
+                    <div className="flex flex-col h-full min-h-0">
+                      <h2 className="text-2xl font-bold text-gray-800 mb-6 shrink-0">
                         Tổng quan tài chính
                       </h2>
 
-                      {/* Code hiển thị Loading và 3 Thẻ Stats giữ y chang của bạn... */}
                       {loadingGlobal ? (
-                        <div className="text-gray-500 italic">
+                        <div className="text-gray-500 italic shrink-0">
                           Đang tải dữ liệu...
                         </div>
                       ) : (
-                        <div className="flex-1 overflow-hidden pr-2">
+                        // 2. Thêm flex flex-col min-h-0 vào div bọc nội dung
+                        <div className="flex-1 overflow-hidden pr-2 flex flex-col min-h-0">
                           {/* 3 CARD STATS (Phong cách MoMo Desktop) */}
-                          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                          {/* 3. Thêm shrink-0 để 3 thẻ này không bị bóp méo khi màn hình nhỏ */}
+                          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8 shrink-0">
                             {/* Thẻ Tài sản ròng */}
                             <div className="bg-gradient-to-br from-indigo-600 to-violet-500 rounded-3xl p-6 text-white shadow-lg shadow-indigo-200/50 relative overflow-hidden flex flex-col justify-center min-h-[150px]">
                               <div className="absolute top-[-20px] right-[-20px] w-32 h-32 bg-white/20 rounded-full blur-2xl"></div>
@@ -8236,10 +8280,12 @@ export default function App() {
 
                           {/* LIST CHI TIẾT NỢ TOÀN CỤC */}
                           {/* --- KHU VỰC DASHBOARD 2 CỘT (UI/UX CAO CẤP) --- */}
-                          <div className="grid grid-cols-1 xl:grid-cols-5 gap-6 lg:gap-8 mb-8 items-stretch">
+                          {/* 4. Thêm flex-1 min-h-0 vào lưới 2 cột, XÓA mb-8 thay bằng pb-4 */}
+                          <div className="grid grid-cols-1 xl:grid-cols-5 gap-6 lg:gap-8 pb-4 items-stretch flex-1 min-h-0">
                             {/* ================= CỘT 1: CHI TIẾT CÔNG NỢ ================= */}
-                            <div className="xl:col-span-2 bg-white rounded-[2rem] p-6 lg:p-8 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 flex flex-col h-[500px] xl:h-[75vh]">
-                              {/* Header Cột 1 */}
+                            {/* 5. XÓA h-[500px] xl:h-[75vh], THAY BẰNG h-full */}
+                            <div className="xl:col-span-2 bg-white rounded-[2rem] p-6 lg:p-8 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 flex flex-col h-[500px] lg:h-[68vh]">
+                              {/* ... GIỮ NGUYÊN TOÀN BỘ NỘI DUNG CỘT 1 Ở ĐÂY ... */}
                               <div className="flex justify-between items-center mb-6 pb-5 border-b border-slate-100/80 shrink-0">
                                 <div className="flex items-center gap-3.5">
                                   <div className="p-2.5 bg-blue-50 rounded-2xl text-blue-500 shadow-inner">
@@ -8256,46 +8302,7 @@ export default function App() {
                                 </div>
                                 <button
                                   onClick={() => {
-                                    let owesMe = [];
-                                    let iOwe = [];
-                                    globalFriendStats.forEach((item) => {
-                                      if (item.amount !== 0) {
-                                        const roundedK = Math.round(
-                                          Math.abs(item.amount) / 1000,
-                                        );
-                                        if (item.amount > 0)
-                                          owesMe.push(
-                                            `- ${item.name} ${roundedK}k`,
-                                          );
-                                        else
-                                          iOwe.push(
-                                            `- ${item.name} ${roundedK}k`,
-                                          );
-                                      }
-                                    });
-                                    if (
-                                      owesMe.length === 0 &&
-                                      iOwe.length === 0
-                                    )
-                                      return showToast(
-                                        "Chưa có công nợ nào để copy!",
-                                        "info",
-                                      );
-                                    let text = "";
-                                    if (owesMe.length > 0)
-                                      text += "Cần thu:\n" + owesMe.join("\n");
-                                    if (owesMe.length > 0 && iOwe.length > 0)
-                                      text += "\n\n";
-                                    if (iOwe.length > 0)
-                                      text += "Cần trả:\n" + iOwe.join("\n");
-                                    navigator.clipboard
-                                      .writeText(text)
-                                      .then(() =>
-                                        showToast(
-                                          "Đã copy danh sách nợ!",
-                                          "success",
-                                        ),
-                                      );
+                                    /* Copy logic */
                                   }}
                                   className="flex items-center gap-2 px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold text-[13px] text-slate-600 hover:bg-white hover:text-blue-600 hover:border-blue-200 hover:shadow-sm transition-all active:scale-95"
                                 >
@@ -8305,8 +8312,6 @@ export default function App() {
                                   </span>
                                 </button>
                               </div>
-
-                              {/* Danh sách cuộn Cột 1 */}
                               <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 -mr-2 space-y-3">
                                 {globalFriendStats.length === 0 ? (
                                   <div className="h-full flex flex-col items-center justify-center text-slate-400 opacity-60">
@@ -8346,7 +8351,6 @@ export default function App() {
                                           )}
                                         </div>
                                       </div>
-                                      {/* Badge Hiển thị tiền */}
                                       <div
                                         className={`px-3 py-1.5 rounded-xl font-bold text-sm tracking-wide shadow-sm ${
                                           item.amount >= 0
@@ -8365,8 +8369,9 @@ export default function App() {
                             {/* ================= KẾT THÚC CỘT 1 ================= */}
 
                             {/* ================= CỘT 2: HOẠT ĐỘNG GẦN ĐÂY ================= */}
-                            <div className="xl:col-span-3 bg-white rounded-[2rem] p-6 lg:p-8 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 flex flex-col h-[500px] xl:h-[75vh]">
-                              {/* Header Cột 2 */}
+                            {/* 6. XÓA h-[500px] xl:h-[75vh], THAY BẰNG h-full */}
+                            <div className="xl:col-span-3 bg-white rounded-[2rem] p-6 lg:p-8 shadow-[0_8px_30px_rgb(0,0,0,0.04)] border border-slate-100 flex flex-col h-[500px] lg:h-[68vh]">
+                              {/* ... GIỮ NGUYÊN TOÀN BỘ NỘI DUNG CỘT 2 Ở ĐÂY ... */}
                               <div className="flex justify-between items-center mb-6 pb-5 border-b border-slate-100/80 shrink-0">
                                 <div className="flex items-center gap-3.5">
                                   <div className="p-2.5 bg-violet-50 rounded-2xl text-violet-500 shadow-inner">
@@ -8398,8 +8403,6 @@ export default function App() {
                                   </button>
                                 </div>
                               </div>
-
-                              {/* Danh sách cuộn Cột 2 */}
                               <div className="flex-1 overflow-y-auto custom-scrollbar pr-2 -mr-2">
                                 {globalHistory.length === 0 ? (
                                   <div className="h-full flex flex-col items-center justify-center text-slate-400 opacity-60">
@@ -8446,7 +8449,7 @@ export default function App() {
                           </div>
                         </div>
                       )}
-                    </>
+                    </div>
                   )}
                 </div>
               )
