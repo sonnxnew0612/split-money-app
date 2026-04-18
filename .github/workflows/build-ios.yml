@@ -21,6 +21,8 @@ jobs:
         run: |
           rm -rf package-lock.json node_modules
           npm install
+          npm install browser-image-compression
+
 
       # --- BƯỚC 1: SỬA LỖI BUILD (QUAN TRỌNG) ---
       - name: Fix @capacitor-firebase/authentication Package.swift
