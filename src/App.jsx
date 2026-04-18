@@ -82,6 +82,7 @@ import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "./firebaseConfig"; // Import từ file config
 import { QRCodeSVG } from "qrcode.react";
 import { motion, AnimatePresence } from "framer-motion";
+import imageCompression from "browser-image-compression";
 
 // --- CẤU HÌNH API CLOUDFLARE ---
 const API_URL = "https://split-money-api.sonnx-pod.workers.dev";
@@ -839,20 +840,37 @@ const ExpenseModal = ({
   };
 
   // --- HANDLERS: UPLOAD ẢNH & COMMENT ---
+  // --- HANDLERS: UPLOAD ẢNH & COMMENT ---
   const handleImageUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
+
     setUploading(true);
     try {
+      // 1. CẤU HÌNH THÔNG SỐ NÉN
+      const options = {
+        maxSizeMB: 0.3, // Ép dung lượng tối đa khoảng 300KB (vẫn đủ sắc nét để đọc bill)
+        maxWidthOrHeight: 1280, // Thu nhỏ kích thước ảnh nếu quá to
+        useWebWorker: true, // Chạy tiến trình nén ngầm, không làm đơ giật giao diện App
+      };
+
+      // 2. THỰC HIỆN NÉN ẢNH
+      const compressedFile = await imageCompression(file, options);
+
+      // 3. TẠO ĐƯỜNG DẪN TÊN FILE TRÊN STORAGE
       const path = `receipts/${groupId || "personal"}/${Date.now()}_${
-        file.name
+        compressedFile.name
       }`;
       const storageRef = ref(storage, path);
-      await uploadBytes(storageRef, file);
+
+      // 4. TIẾN HÀNH UPLOAD FILE ĐÃ NÉN
+      await uploadBytes(storageRef, compressedFile);
       const url = await getDownloadURL(storageRef);
+
       setForm((prev) => ({ ...prev, billImage: url }));
       showToast("Đã tải ảnh lên!", "success");
     } catch (error) {
+      console.error("Lỗi nén/tải ảnh:", error);
       showToast("Lỗi tải ảnh: " + error.message, "error");
     } finally {
       setUploading(false);
@@ -1599,57 +1617,70 @@ const ExpenseModal = ({
                                   <label className=" font-black text-blue-400 uppercase tracking-widest mb-1 block">
                                     Tiền Ship (+)
                                   </label>
-                                  <input
-                                    type="text"
-                                    inputMode="numeric"
-                                    pattern="[0-9]*"
-                                    placeholder="0"
-                                    className="w-full p-2.5 bg-white rounded-xl font-bold text-gray-700 outline-none focus:ring-2 ring-blue-200 text-right shadow-sm"
-                                    value={
-                                      form.shippingFee
-                                        ? form.shippingFee.replace(
-                                            /\B(?=(\d{3})+(?!\d))/g,
-                                            ".",
-                                          )
-                                        : ""
-                                    }
-                                    onChange={(e) => {
-                                      const val = e.target.value.replace(
-                                        /\./g,
-                                        "",
-                                      );
-                                      if (/^\d*$/.test(val))
-                                        setForm({ ...form, shippingFee: val });
-                                    }}
-                                  />
+                                  <div className="flex items-center bg-white rounded-xl focus-within:ring-2 ring-blue-200 shadow-sm pr-3">
+                                    <input
+                                      type="text"
+                                      inputMode="numeric"
+                                      pattern="[0-9]*"
+                                      placeholder="0"
+                                      className="w-full p-2.5 bg-transparent font-bold text-gray-700 outline-none text-right"
+                                      value={
+                                        form.shippingFee
+                                          ? form.shippingFee.replace(
+                                              /\B(?=(\d{3})+(?!\d))/g,
+                                              ".",
+                                            )
+                                          : ""
+                                      }
+                                      onChange={(e) => {
+                                        const val = e.target.value.replace(
+                                          /\./g,
+                                          "",
+                                        );
+                                        if (/^\d*$/.test(val))
+                                          setForm({
+                                            ...form,
+                                            shippingFee: val,
+                                          });
+                                      }}
+                                    />
+                                    <span className="text-gray-400 font-bold shrink-0 ml-1">
+                                      đ
+                                    </span>
+                                  </div>
                                 </div>
                                 <div className="flex-1">
                                   <label className=" font-black text-teal-500 uppercase tracking-widest mb-1 block">
                                     Giảm giá (-)
                                   </label>
-                                  <input
-                                    type="text"
-                                    inputMode="numeric"
-                                    pattern="[0-9]*"
-                                    placeholder="0"
-                                    className="w-full p-2.5 bg-white rounded-xl font-bold text-teal-600 outline-none focus:ring-2 ring-teal-200 text-right shadow-sm"
-                                    value={
-                                      form.discount
-                                        ? form.discount.replace(
-                                            /\B(?=(\d{3})+(?!\d))/g,
-                                            ".",
-                                          )
-                                        : ""
-                                    }
-                                    onChange={(e) => {
-                                      const val = e.target.value.replace(
-                                        /\./g,
-                                        "",
-                                      );
-                                      if (/^\d*$/.test(val))
-                                        setForm({ ...form, discount: val });
-                                    }}
-                                  />
+                                  <div className="flex items-center bg-white rounded-xl focus-within:ring-2 ring-teal-200 shadow-sm pr-3">
+                                    <input
+                                      type="text"
+                                      inputMode="numeric"
+                                      pattern="[0-9]*"
+                                      placeholder="0"
+                                      className="w-full p-2.5 bg-transparent font-bold text-teal-600 outline-none text-right"
+                                      value={
+                                        form.discount
+                                          ? form.discount.replace(
+                                              /\B(?=(\d{3})+(?!\d))/g,
+                                              ".",
+                                            )
+                                          : ""
+                                      }
+                                      onChange={(e) => {
+                                        const val = e.target.value.replace(
+                                          /\./g,
+                                          "",
+                                        );
+                                        if (/^\d*$/.test(val))
+                                          setForm({ ...form, discount: val });
+                                      }}
+                                    />
+                                    <span className="text-gray-400 font-bold shrink-0 ml-1">
+                                      đ
+                                    </span>
+                                  </div>
                                 </div>
                               </div>
 
@@ -1734,7 +1765,7 @@ const ExpenseModal = ({
                                           {p.name}
                                         </span>
                                       </div>
-                                      <div className="flex items-center gap-2 bg-white px-1.5 py-1 rounded-lg border border-gray-200 shadow-sm">
+                                      <div className="flex items-center gap-2 bg-white px-1.5 py-1 rounded-lg border border-gray-200 shadow-sm shrink-0">
                                         <button
                                           onClick={() =>
                                             handleRemoveQuantity(p.id)
@@ -1763,17 +1794,17 @@ const ExpenseModal = ({
                                           className="flex items-center gap-2 animate-fade-in md:pl-[52px]"
                                         >
                                           {amounts.length > 1 && (
-                                            <span className=" font-bold text-gray-400 uppercase w-10 shrink-0">
+                                            <span className=" font-bold text-gray-400 uppercase w-10 shrink-0 text-xs md:text-sm">
                                               Món {idx + 1}
                                             </span>
                                           )}
-                                          <div className="relative flex-1">
+                                          <div className="flex-1 flex items-center bg-white rounded-xl focus-within:ring-2 ring-indigo-200 shadow-sm pr-3">
                                             <input
                                               type="text"
                                               inputMode="numeric"
                                               pattern="[0-9]*"
                                               placeholder="0"
-                                              className="w-full text-right p-2.5 rounded-xl font-bold outline-none focus:ring-2 ring-indigo-200 bg-white text-gray-700 focus:text-indigo-600 shadow-sm pr-7"
+                                              className="w-full text-right p-2.5 font-bold outline-none bg-transparent text-gray-700 focus:text-indigo-600"
                                               value={
                                                 amt
                                                   ? String(amt).replace(
@@ -1796,7 +1827,7 @@ const ExpenseModal = ({
                                                   );
                                               }}
                                             />
-                                            <span className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400  font-bold">
+                                            <span className="text-gray-400 font-bold shrink-0 ml-1">
                                               đ
                                             </span>
                                           </div>
@@ -1807,20 +1838,20 @@ const ExpenseModal = ({
                                     {/* 3. BẢNG HIỂN THỊ CHI TIẾT SAU KHI TRỪ */}
                                     {originalShare > 0 && pAdjustment !== 0 && (
                                       <div className="mt-3 pt-3 border-t border-gray-200 flex justify-between items-center bg-white p-3 rounded-xl shadow-sm md:ml-[52px] animate-fade-in">
-                                        <div className="flex flex-col">
-                                          <span className=" font-black text-gray-400 uppercase mb-0.5">
+                                        <div className="flex flex-col min-w-0 pr-2">
+                                          <span className=" font-black text-gray-400 uppercase mb-0.5 text-xs">
                                             Thực tế
                                           </span>
-                                          <div className="flex items-center gap-2">
-                                            <span className=" font-bold text-gray-400 line-through">
+                                          <div className="flex items-center gap-2 flex-wrap">
+                                            <span className=" font-bold text-gray-400 line-through text-sm">
                                               {fmt(originalShare)}đ
                                             </span>
                                             <ArrowRightLeft
                                               size={10}
-                                              className="text-gray-300"
+                                              className="text-gray-300 shrink-0"
                                             />
                                             <span
-                                              className={`text-base md:text-sm font-black ${
+                                              className={`text-sm md:text-sm font-black ${
                                                 pAdjustment > 0
                                                   ? "text-teal-600"
                                                   : "text-rose-500"
@@ -1831,15 +1862,13 @@ const ExpenseModal = ({
                                           </div>
                                         </div>
                                         <div
-                                          className={`px-2.5 py-1.5 rounded-lg  font-black ${
+                                          className={`px-2 py-1.5 rounded-lg text-[11px] md:text-xs font-black whitespace-nowrap shrink-0 text-center ${
                                             pAdjustment > 0
                                               ? "bg-teal-50 text-teal-600 border border-teal-100"
                                               : "bg-rose-50 text-rose-500 border border-rose-100"
                                           }`}
                                         >
-                                          {pAdjustment > 0
-                                            ? "Giảm "
-                                            : "Phí ship "}
+                                          {pAdjustment > 0 ? "Giảm " : "Ship "}
                                           {fmt(Math.abs(pAdjustment))}đ
                                         </div>
                                       </div>
@@ -2169,27 +2198,37 @@ const ExpenseModal = ({
 
 const LoginModal = ({ isOpen, onClose, showToast }) => {
   const [isRegistering, setIsRegistering] = useState(false);
-  const [isForgotPassword, setIsForgotPassword] = useState(false); // [MỚI] Chế độ quên mật khẩu
+  const [isForgotPassword, setIsForgotPassword] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [fullName, setFullName] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  // [MỚI] State cho checkbox nhớ tài khoản
+  const [rememberMe, setRememberMe] = useState(true);
+
   useEffect(() => {
-    if (!isOpen) {
-      // Reset form
-      setEmail("");
+    if (isOpen) {
+      // [MỚI] Lấy email đã lưu từ bộ nhớ máy (nếu có)
+      const savedEmail = localStorage.getItem("sm_saved_email");
+      if (savedEmail) {
+        setEmail(savedEmail);
+        setRememberMe(true);
+      } else {
+        setEmail("");
+      }
+
+      // Reset các trường khác
       setPassword("");
       setFullName("");
       setError("");
       setIsRegistering(false);
       setIsForgotPassword(false);
-      setShowPassword(false); // [MỚI] Reset về ẩn
+      setShowPassword(false);
     }
   }, [isOpen]);
 
-  // [MỚI] Hàm xử lý quên mật khẩu
   const handleResetPassword = async (e) => {
     e.preventDefault();
     if (!email) {
@@ -2224,15 +2263,12 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
     setError("");
     setIsLoading(true);
 
-    // [FIX IPHONE] 1. Tạo một cái "đồng hồ" đếm ngược 10 giây
     const timeoutPromise = new Promise((_, reject) => {
       setTimeout(() => reject(new Error("TIMEOUT")), 10000);
     });
 
     try {
       if (isRegistering) {
-        // --- ĐĂNG KÝ (Kèm cơ chế đua Timeout) ---
-        // Nếu Firebase treo -> timeoutPromise sẽ thắng và báo lỗi sau 10s
         const userCredential = await Promise.race([
           createUserWithEmailAndPassword(auth, email, password),
           timeoutPromise,
@@ -2252,8 +2288,6 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
         setIsRegistering(false);
         setPassword("");
       } else {
-        // --- ĐĂNG NHẬP (Kèm cơ chế đua Timeout) ---
-        // Nếu Firebase treo -> timeoutPromise sẽ thắng và báo lỗi sau 10s
         const userCredential = await Promise.race([
           signInWithEmailAndPassword(auth, email, password),
           timeoutPromise,
@@ -2264,17 +2298,21 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
           await signOut(auth);
           throw new Error("auth/email-not-verified");
         }
+
+        // [MỚI] LƯU EMAIL NẾU ĐƯỢC TICK CHỌN
+        if (rememberMe) {
+          localStorage.setItem("sm_saved_email", email);
+        } else {
+          localStorage.removeItem("sm_saved_email");
+        }
+
         showToast("Đăng nhập thành công!", "success");
         onClose();
       }
     } catch (err) {
-      // [FIX IPHONE] 2. Xử lý lỗi Timeout riêng biệt
       if (err.message === "TIMEOUT") {
-        setError(
-          "Kết nối quá lâu (Timeout). Vui lòng tắt Wifi bật 4G hoặc thử lại sau.",
-        );
+        setError("Kết nối quá lâu. Vui lòng kiểm tra mạng hoặc thử lại sau.");
       } else {
-        // Các lỗi cũ giữ nguyên
         let msg = err.message;
         if (msg.includes("auth/email-not-verified"))
           msg = "Bạn chưa xác thực Email! Kiểm tra hộp thư (cả mục Spam).";
@@ -2301,7 +2339,7 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-[300] bg-black/40  flex items-center justify-center p-4 animate-fade-in">
+    <div className="fixed inset-0 z-[300] bg-black/40 flex items-center justify-center p-4 animate-fade-in">
       <div
         className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 transform transition-all scale-100 animate-slide-up relative"
         onClick={(e) => e.stopPropagation()}
@@ -2321,7 +2359,6 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
             : "Đăng Nhập"}
         </h2>
 
-        {/* Form dùng chung: Nếu quên mật khẩu thì chạy handleResetPassword, ngược lại chạy handleSubmit */}
         <form
           onSubmit={isForgotPassword ? handleResetPassword : handleSubmit}
           className="flex flex-col gap-4"
@@ -2360,12 +2397,10 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
           {/* Mật khẩu (Ẩn khi Quên mật khẩu) */}
           {!isForgotPassword && (
             <div className="relative animate-fade-in">
-              {/* [FIX] Ổ khóa: Căn giữa theo chiều dọc (top-1/2 -translate-y-1/2) */}
               <Lock
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"
                 size={18}
               />
-
               <input
                 type={showPassword ? "text" : "password"}
                 placeholder="Mật khẩu"
@@ -2374,14 +2409,40 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
                 required={!isForgotPassword}
                 className="w-full pl-10 pr-10 py-3 rounded-xl border border-gray-200 focus:border-blue-500 outline-none transition-all"
               />
-
-              {/* [FIX] Nút Con mắt: Căn giữa theo chiều dọc (top-1/2 -translate-y-1/2) */}
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-indigo-600 transition-colors flex items-center justify-center p-1"
               >
                 {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
+              </button>
+            </div>
+          )}
+
+          {/* [MỚI] Hàng nút Nhớ tài khoản & Quên mật khẩu */}
+          {!isRegistering && !isForgotPassword && (
+            <div className="flex items-center justify-between mt-1 animate-fade-in">
+              <label className="flex items-center gap-2 cursor-pointer group">
+                <input
+                  type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
+                  className="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500 cursor-pointer"
+                />
+                <span className="text-sm text-gray-600 font-medium group-hover:text-indigo-600 transition-colors">
+                  Nhớ email
+                </span>
+              </label>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setIsForgotPassword(true);
+                  setError("");
+                }}
+                className="text-sm text-indigo-600 hover:text-indigo-800 font-bold transition-colors"
+              >
+                Quên mật khẩu?
               </button>
             </div>
           )}
@@ -2396,12 +2457,12 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
           <button
             type="submit"
             disabled={isLoading}
-            className="w-full py-3 bg-indigo-500 text-white rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-indigo-200/50 flex items-center justify-center gap-2 transition-all"
+            className="w-full py-3 mt-2 bg-indigo-500 text-white rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-indigo-200/50 flex items-center justify-center gap-2 transition-all"
           >
             {isLoading ? (
               <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
             ) : isForgotPassword ? (
-              "Gửi Email Khôi Phục"
+              "Gửi link Đặt lại mật khẩu"
             ) : isRegistering ? (
               "Đăng Ký & Gửi Email"
             ) : (
@@ -2411,22 +2472,9 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
         </form>
 
         <div className="mt-6 text-center text-base md:text-sm text-gray-500 space-y-2">
-          {/* Nút chuyển qua lại Quên mật khẩu */}
-          {!isRegistering && !isForgotPassword && (
-            <button
-              onClick={() => {
-                setIsForgotPassword(true);
-                setError("");
-              }}
-              className="text-gray-500 hover:text-indigo-600 underline block w-full mb-2"
-            >
-              Quên mật khẩu?
-            </button>
-          )}
-
           <p>
             {isForgotPassword
-              ? "Đã nhớ mật khẩu? "
+              ? "Đã nhớ ra mật khẩu? "
               : isRegistering
               ? "Đã có tài khoản? "
               : "Chưa có tài khoản? "}
@@ -2436,7 +2484,7 @@ const LoginModal = ({ isOpen, onClose, showToast }) => {
                 else setIsRegistering(!isRegistering);
                 setError("");
               }}
-              className="text-indigo-600 font-bold hover:underline"
+              className="text-indigo-600 font-bold hover:underline transition-colors"
             >
               {isForgotPassword
                 ? "Đăng nhập"
@@ -2481,28 +2529,32 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
 
     setUploading(true);
     try {
-      // 1. Tải ảnh lên Storage
+      // 1. Tải ảnh lên Storage VÀ ÉP FIREBASE KHÔNG CACHE BẰNG METADATA
       const storageRef = ref(storage, `profile_pictures/${user.uid}`);
       await uploadBytes(storageRef, file);
-      const url = await getDownloadURL(storageRef);
+
+      const rawUrl = await getDownloadURL(storageRef);
+
+      // ==========================================
+      // BÍ QUYẾT TRỊ 412: Bơm Timestamp vào Link ảnh!
+      // Việc này làm cho Link ảnh thay đổi mỗi lần upload,
+      // Electron sẽ không bao giờ dùng lại Cache cũ gây lỗi nữa.
+      // ==========================================
+      const separator = rawUrl.includes("?") ? "&" : "?";
+      const url = `${rawUrl}${separator}t=${Date.now()}`;
 
       // 2. Cập nhật vào hệ thống Auth
       await updateProfile(user, { photoURL: url });
 
-      // ==========================================
-      // 3. [CODE MỚI] LƯU ẢNH VÀO FIRESTORE ĐỂ BẠN BÈ THẤY
-      // ==========================================
+      // 3. LƯU ẢNH VÀO FIRESTORE ĐỂ BẠN BÈ THẤY
       const userRef = doc(db, "users", user.uid);
       await setDoc(userRef, { photoURL: url }, { merge: true });
 
-      // ==========================================
-      // 4. [CODE MỚI] ĐỔI ẢNH HÀNG LOẠT TRONG CÁC NHÓM ĐANG THAM GIA
-      // ==========================================
+      // 4. ĐỔI ẢNH HÀNG LOẠT TRONG CÁC NHÓM ĐANG THAM GIA
       const userDoc = await getDoc(userRef);
       if (userDoc.exists()) {
         const joinedGroups = userDoc.data().joinedGroups || [];
 
-        // Quét qua tất cả các nhóm mình có mặt
         for (const g of joinedGroups) {
           const groupRef = doc(db, "groups", g.id);
           const groupSnap = await getDoc(groupRef);
@@ -2511,12 +2563,10 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
             const gData = groupSnap.data();
             let updatedMembers = gData.members || [];
 
-            // Tìm tên mình trong nhóm và cập nhật lại link ảnh mới
             updatedMembers = updatedMembers.map((m) =>
               m.id === user.uid ? { ...m, photoURL: url } : m,
             );
 
-            // Lưu lại vào nhóm
             await updateDoc(groupRef, { members: updatedMembers });
           }
         }
@@ -2524,7 +2574,7 @@ const UserProfileModal = ({ isOpen, onClose, user, onLogout, showToast }) => {
 
       showToast("Đã cập nhật ảnh đại diện thành công!", "success");
 
-      // [QUAN TRỌNG]: Tự động tải lại trang để Firebase Auth làm mới dữ liệu ảnh toàn App
+      // Reload lại app để áp dụng link ảnh mới
       setTimeout(() => {
         window.location.reload();
       }, 1500);
@@ -3204,6 +3254,32 @@ const HistoryItem = React.memo(
 );
 
 export default function App() {
+  useEffect(() => {
+    const handleGlobalImageError = (e) => {
+      const target = e.target;
+      // Nếu thẻ bị lỗi là thẻ IMG, link từ Firebase và chưa được thử lại
+      if (
+        target &&
+        target.tagName === "IMG" &&
+        target.src &&
+        target.src.includes("firebasestorage") &&
+        !target.src.includes("retry_bypass=")
+      ) {
+        // Gắn thêm tham số ngẫu nhiên để lừa Electron tải lại từ đầu
+        const sep = target.src.includes("?") ? "&" : "?";
+        target.src = `${target.src}${sep}retry_bypass=${Date.now()}`;
+      }
+    };
+
+    // 'true' ở đây là chìa khóa: Chặn bắt sự kiện từ cấp Window (Capture Phase)
+    window.addEventListener("error", handleGlobalImageError, true);
+
+    return () => {
+      window.removeEventListener("error", handleGlobalImageError, true);
+    };
+  }, []);
+  // ==============================================================
+
   const [people, setPeople] = useState(
     () => JSON.parse(localStorage.getItem("sm_people")) || [],
   );
@@ -3257,7 +3333,6 @@ export default function App() {
 
     const handleResize = () => {
       // CHỈ PHÁT HIỆN LÀ MOBILE NẾU CHIỀU RỘNG THAY ĐỔI ĐÁNG KỂ (TRÊN 50px)
-      // Việc này giúp bỏ qua những sai số nhỏ do bàn phím ảo của iPad gây ra
       if (Math.abs(window.innerWidth - lastWidth) > 50) {
         setIsMobileView(window.innerWidth < 768);
         lastWidth = window.innerWidth;
@@ -3265,7 +3340,27 @@ export default function App() {
     };
 
     window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
+
+    // =========================================================
+    // FIX LỖI BÓP MÀN HÌNH IPAD: Bắt sự kiện khi App được mở lại
+    // =========================================================
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        setTimeout(() => {
+          // Ép app quên chiều rộng cũ và tính toán lại từ đầu
+          lastWidth = 0;
+          setIsMobileView(window.innerWidth < 768);
+          // Bắn ra một cú hích báo hiệu màn hình vừa thay đổi
+          window.dispatchEvent(new Event("resize"));
+        }, 200); // Đợi 200ms để hoạt ảnh mở app của iOS chạy xong
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
   }, []);
 
   // --- AUTO-FIX BUG "me": CHUYỂN ĐỔI CHỮ "me" THÀNH UID CỦA CHỦ NHÓM ---
@@ -5553,7 +5648,8 @@ export default function App() {
 
   if (authLoading) {
     return (
-      <div className="fixed inset-0 h-[100dvh] w-screen flex flex-col items-center justify-center bg-gradient-to-br from-indigo-600 to-violet-600 relative overflow-hidden z-[9999]">
+      // ĐÃ FIX: Chỉ dùng "fixed inset-0". XÓA CHỮ "relative", "w-full", "h-[100dvh]"
+      <div className="fixed inset-0 flex flex-col items-center justify-center bg-gradient-to-br from-indigo-600 to-violet-600 overflow-hidden z-[9999]">
         {/* --- Hiệu ứng ánh sáng nền (Glow Blur) --- */}
         <div className="absolute top-[-10%] right-[-10%] w-72 h-72 bg-white/10 rounded-full blur-3xl pointer-events-none animate-pulse"></div>
         <div
@@ -5561,10 +5657,9 @@ export default function App() {
           style={{ animationDelay: "1s" }}
         ></div>
 
-        <div className="relative z-10 flex flex-col items-center animate-fade-in">
-          {/* --- Icon App (ĐÃ THAY THÀNH <img> VỚI LOGO XỊN) --- */}
-          <div className="w-28 h-28 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-900/50 mb-8 relative">
-            {/* Đổi object-contain thành object-cover và bo góc cho khớp hoàn toàn */}
+        <div className="relative z-10 flex flex-col items-center animate-fade-in px-4">
+          {/* --- Icon App --- */}
+          <div className="w-28 h-28 shrink-0 rounded-[2rem] flex items-center justify-center shadow-2xl shadow-indigo-900/50 mb-8 relative">
             <img
               src={appIcon}
               alt="Split Money Logo"
@@ -5573,18 +5668,16 @@ export default function App() {
           </div>
 
           {/* --- Vòng xoay Loading Custom --- */}
-          <div className="relative w-12 h-12 mb-5">
-            {/* Vòng mờ bên dưới */}
+          <div className="relative w-12 h-12 mb-5 shrink-0">
             <div className="absolute inset-0 border-4 border-white/20 rounded-full"></div>
-            {/* Vòng chạy xoay bên trên */}
             <div className="absolute inset-0 border-4 border-white border-t-transparent border-l-transparent rounded-full animate-spin"></div>
           </div>
 
           {/* --- Tên App & Dòng chữ Loading --- */}
-          <h2 className="text-2xl font-bold text-white tracking-wide mb-1 drop-shadow-md">
+          <h2 className="text-2xl font-bold text-white tracking-wide mb-1 drop-shadow-md text-center shrink-0">
             Split Money
           </h2>
-          <p className="text-indigo-200 text-base md:text-sm font-medium animate-pulse">
+          <p className="text-indigo-200 text-base md:text-sm font-medium animate-pulse text-center shrink-0">
             Đang tải dữ liệu...
           </p>
         </div>
@@ -5846,7 +5939,7 @@ export default function App() {
   };
 
   return (
-    <div className="fixed inset-0 h-[100dvh] w-screen bg-gray-50 font-sans overflow-hidden flex flex-col overscroll-none">
+    <div className="fixed inset-0 bg-gray-50 font-sans overflow-hidden flex flex-col overscroll-none">
       <Toast
         message={toast?.message}
         type={toast?.type}
@@ -7567,13 +7660,8 @@ export default function App() {
                       }
                       // Nếu nhả tay mà khoảng cách < 120px, Framer Motion sẽ TỰ ĐỘNG hút giao diện về lại tọa độ animate={{ x: 0 }}
                     }}
-                    className="fixed inset-0 z-50 bg-white flex flex-col shadow-[-10px_0_30px_rgba(0,0,0,0.1)] pt-[env(safe-area-inset-top)]"
+                    className="fixed inset-0 z-50 bg-white flex flex-col shadow-[-10px_0_30px_rgba(0,0,0,0.1)] pt-[max(18px,env(safe-area-inset-top))]"
                   >
-                    style=
-                    {{
-                      paddingTop: "max(18px, env(safe-area-inset-top))",
-                    }}
-                    >
                     <div className="p-4 border-b border-gray-100 flex items-center gap-3">
                       <button
                         onClick={() => setSelectedPersonId(null)}

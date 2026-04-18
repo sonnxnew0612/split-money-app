@@ -1,6 +1,11 @@
-// electron-main.js (Đã sửa lỗi load nhầm file cũ)
-const { app, BrowserWindow } = require("electron");
+// electron-main.js (Đã fix lỗi 412 Cache Avatar)
+const { app, BrowserWindow, session } = require("electron");
 const path = require("path");
+
+// --- THÊM DÒNG NÀY: Ép Electron tắt hoàn toàn Cache HTTP khi ở chế độ DEV ---
+if (!app.isPackaged) {
+  app.commandLine.appendSwitch("disable-http-cache");
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -14,21 +19,20 @@ function createWindow() {
     autoHideMenuBar: true,
   });
 
-  // URL của Vite dev server
   const startUrl = "http://localhost:5173";
 
-  // SỬA QUAN TRỌNG: Dùng app.isPackaged để kiểm tra môi trường
-  // !app.isPackaged = True khi đang chạy npm run electron:dev
-  // app.isPackaged = True khi đã đóng gói thành file .exe
   if (!app.isPackaged) {
     console.log("Dang chay Mode DEV -> Load URL: " + startUrl);
-    win.loadURL(startUrl);
 
-    // Mở DevTools để bạn dễ debug (tùy chọn, có thể comment lại nếu không thích)
+    // --- THÊM ĐOẠN NÀY: Xóa sạch cache tồn đọng của phiên làm việc trước ---
+    session.defaultSession.clearCache().then(() => {
+      console.log("Đã dọn sạch Cache của Electron!");
+      win.loadURL(startUrl);
+    });
+
     // win.webContents.openDevTools();
   } else {
     console.log("Dang chay Mode PRODUCTION -> Load File index.html");
-    // Khi build ra file exe thì load file html đã đóng gói
     win.loadFile(path.join(__dirname, "dist/index.html"));
   }
 }
