@@ -3741,6 +3741,7 @@ export default function App() {
   const [isProfileOpen, setIsProfileOpen] = useState(false);
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
+  const recoveredGroupsRef = useRef(new Set());
 
   const normalizeEmail = (email = "") => email.trim().toLowerCase();
   const normalizeName = (name = "") => name.trim().toLowerCase();
@@ -3764,11 +3765,28 @@ export default function App() {
       return true;
     });
   };
-  const normalizeGroupList = (list = []) =>
-    list.reduce(
-      (acc, group) => (group?.id ? upsertGroupList(acc, group) : acc),
-      [],
-    );
+  const normalizeGroupList = (list = []) => {
+    const sourceList = Array.isArray(list)
+      ? list
+      : list && typeof list === "object"
+        ? Object.entries(list).map(([id, value]) =>
+            value && typeof value === "object" ? { id, ...value } : id,
+          )
+        : [];
+
+    return sourceList.reduce((acc, group) => {
+      if (!group) return acc;
+      const groupInfo =
+        typeof group === "string"
+          ? { id: group, name: group, icon: "💰" }
+          : {
+              id: group.id || group.groupId || group.code,
+              name: group.name || group.title || group.id || "Nhóm không tên",
+              icon: group.icon || "💰",
+            };
+      return groupInfo.id ? upsertGroupList(acc, groupInfo) : acc;
+    }, []);
+  };
   const normalizeContactList = (list = []) => dedupeContacts(list || []);
   const getDisplayNameFromUser = (u = user) =>
     u?.displayName || u?.email?.split("@")[0] || "Tôi";
@@ -3822,6 +3840,50 @@ export default function App() {
     updateUserListField(uid, "contacts", (list) =>
       upsertContactList(list, contact),
     );
+  const recoverJoinedGroupsFromMembership = async (uid, userData = {}) => {
+    if (!uid) return [];
+
+    const emailKey = normalizeEmail(userData.email || user?.email || "");
+    const existingGroups = normalizeGroupList(userData.joinedGroups || []);
+    const groupsSnap = await getDocs(collection(db, "groups"));
+    const recoveredGroups = [];
+
+    groupsSnap.forEach((groupDoc) => {
+      const groupData = groupDoc.data();
+      const members = Array.isArray(groupData.members) ? groupData.members : [];
+      const isMember =
+        groupData.createdBy === uid ||
+        members.some(
+          (member) =>
+            member.id === uid ||
+            (!!emailKey && normalizeEmail(member.email) === emailKey),
+        );
+
+      if (isMember) {
+        recoveredGroups.push(makeGroupInfo(groupDoc.id, groupData));
+      }
+    });
+
+    const nextGroups = recoveredGroups.reduce(
+      (acc, groupInfo) => upsertGroupList(acc, groupInfo),
+      existingGroups,
+    );
+
+    const existingIds = new Set(existingGroups.map((group) => group.id));
+    const hasRecoveredNewGroup = nextGroups.some(
+      (group) => !existingIds.has(group.id),
+    );
+
+    if (hasRecoveredNewGroup) {
+      await setDoc(
+        doc(db, "users", uid),
+        { joinedGroups: nextGroups },
+        { merge: true },
+      );
+    }
+
+    return nextGroups;
+  };
   const findUserAccountByEmail = async (email) => {
     const emailKey = normalizeEmail(email);
     if (!emailKey) return null;
@@ -4304,10 +4366,10 @@ export default function App() {
             photoURL: currentUser.photoURL || "",
           };
 
-          if (!Array.isArray(userData.contacts)) userProfilePayload.contacts = [];
-          if (!Array.isArray(userData.joinedGroups))
+          if (userData.contacts === undefined) userProfilePayload.contacts = [];
+          if (userData.joinedGroups === undefined)
             userProfilePayload.joinedGroups = [];
-          if (!Array.isArray(userData.friendRequests))
+          if (userData.friendRequests === undefined)
             userProfilePayload.friendRequests = [];
 
           await setDoc(userRef, userProfilePayload, { merge: true });
@@ -4447,9 +4509,27 @@ export default function App() {
     const unsub = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
       if (docSnap.exists()) {
         const userData = docSnap.data();
-        setMyGroups(normalizeGroupList(userData.joinedGroups || []));
+        const normalizedGroups = normalizeGroupList(userData.joinedGroups || []);
+        setMyGroups(normalizedGroups);
         setContacts(normalizeContactList(userData.contacts || []));
         setFriendRequests(userData.friendRequests || []); // <--- THÊM DÒNG NÀY
+
+        if (!recoveredGroupsRef.current.has(user.uid)) {
+          recoveredGroupsRef.current.add(user.uid);
+          recoverJoinedGroupsFromMembership(user.uid, userData)
+            .then((recoveredGroups) => {
+              if (recoveredGroups.length > normalizedGroups.length) {
+                setMyGroups(recoveredGroups);
+                showToast(
+                  `Đã khôi phục ${recoveredGroups.length} nhóm cũ cho tài khoản này.`,
+                  "success",
+                );
+              }
+            })
+            .catch((error) => {
+              console.error("Không thể khôi phục danh sách nhóm:", error);
+            });
+        }
       }
     });
     return () => unsub();
