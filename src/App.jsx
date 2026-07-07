@@ -71,8 +71,6 @@ import {
   setDoc,
   getDoc,
   deleteDoc,
-  arrayUnion,
-  arrayRemove,
   collection,
   query,
   where,
@@ -3430,21 +3428,22 @@ export default function App() {
     let newExpenses = [...expenses];
 
     people.forEach((p) => {
-      if (!p.email) return; // Nếu không có email thì bỏ qua
+      const emailKey = normalizeEmail(p.email);
+      if (!emailKey) return; // Nếu không có email thì bỏ qua
 
-      if (!emailMap[p.email]) {
-        emailMap[p.email] = p;
+      if (!emailMap[emailKey]) {
+        emailMap[emailKey] = p;
       } else {
         // PHÁT HIỆN TRÙNG EMAIL TRONG CÙNG 1 NHÓM!
         needsUpdate = true;
-        const existing = emailMap[p.email];
+        const existing = emailMap[emailKey];
 
         // Xác định ai là tài khoản "Thật" (ưu tiên có Avatar hoặc ID dài hơn)
         let realId, fakeId;
-        if (p.photoURL || p.id.length > existing.id.length) {
+        if (p.photoURL || String(p.id).length > String(existing.id).length) {
           realId = p.id;
           fakeId = existing.id;
-          emailMap[p.email] = p; // Cập nhật người "thật" vào danh sách chuẩn
+          emailMap[emailKey] = p; // Cập nhật người "thật" vào danh sách chuẩn
         } else {
           realId = existing.id;
           fakeId = p.id;
@@ -3453,34 +3452,11 @@ export default function App() {
         // 1. Gạch tên tài khoản ảo khỏi danh sách thành viên nhóm
         newPeople = newPeople.filter((m) => m.id !== fakeId);
 
-        // 2. Chuyển toàn bộ tiền nợ, lịch sử chi tiêu từ ID ảo sang ID thật
-        newExpenses = newExpenses.map((exp) => {
-          let newExp = { ...exp };
-          if (newExp.payerId === fakeId) newExp.payerId = realId; // Đổi người trả
-
-          if (newExp.sharedWith?.includes(fakeId)) {
-            newExp.sharedWith = [
-              ...new Set(
-                newExp.sharedWith.map((id) => (id === fakeId ? realId : id)),
-              ),
-            ];
-          }
-          if (newExp.settledBy?.includes(fakeId)) {
-            newExp.settledBy = [
-              ...new Set(
-                newExp.settledBy.map((id) => (id === fakeId ? realId : id)),
-              ),
-            ];
-          }
-          if (
-            newExp.customShares &&
-            newExp.customShares[fakeId] !== undefined
-          ) {
-            newExp.customShares[realId] = newExp.customShares[fakeId];
-            delete newExp.customShares[fakeId];
-          }
-          return newExp;
-        });
+        // 2. Chuyển toàn bộ tiền nợ, lịch sử chi tiêu từ ID ảo sang ID thật.
+        // Không dùng Set với sharedWith vì app có logic một người nhiều suất.
+        newExpenses = newExpenses.map((exp) =>
+          replaceExpenseMemberId(exp, fakeId, realId),
+        );
       }
     });
 
@@ -3489,9 +3465,10 @@ export default function App() {
       updateDoc(doc(db, "groups", groupId), {
         members: newPeople,
         expenses: newExpenses,
+        updatedAt: new Date().toISOString(),
       })
         .then(() => {
-          showToast("Hệ thống đã tự động gộp 2 tài khoản Thu Hà!", "success");
+          showToast("Đã tự động gộp thành viên trùng email.", "success");
         })
         .catch((e) => console.error("Lỗi gộp:", e));
     }
@@ -3677,10 +3654,23 @@ export default function App() {
           const groupSnap = await getDoc(groupRef);
           if (groupSnap.exists()) {
             const gData = groupSnap.data();
-            const newMembers = (gData.members || []).filter(
-              (m) => m.id !== user.uid,
+            const groupExpenses = gData.expenses || [];
+            const hasExpenseHistory = groupExpenses.some(
+              (e) =>
+                e.payerId === user.uid || (e.sharedWith || []).includes(user.uid),
             );
-            await updateDoc(groupRef, { members: newMembers });
+            const newMembers = hasExpenseHistory
+              ? (gData.members || []).map((m) =>
+                  m.id === user.uid
+                    ? { ...m, leftAt: new Date().toISOString() }
+                    : m,
+                )
+              : (gData.members || []).filter((m) => m.id !== user.uid);
+
+            await updateDoc(groupRef, {
+              members: newMembers,
+              updatedAt: new Date().toISOString(),
+            });
           }
 
           // 3. Cập nhật UI
@@ -3734,6 +3724,7 @@ export default function App() {
   // States cho thêm người (Có thêm email)
   const [newPersonName, setNewPersonName] = useState("");
   const [newPersonEmail, setNewPersonEmail] = useState(""); // <--- MỚI
+  const [isAddingGroupMember, setIsAddingGroupMember] = useState(false);
   // --- STATES CHO TÌM KIẾM & HỢP NHẤT TÀI KHOẢN ---
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
@@ -3751,69 +3742,302 @@ export default function App() {
   const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
   const [isHistoryModalOpen, setIsHistoryModalOpen] = useState(false);
 
-  // --- REQUEST NOTIFICATION PERMISSION ---
-  useEffect(() => {
-    if (Capacitor.isNativePlatform()) {
-      PushNotifications.requestPermissions().then((result) => {
-        if (result.receive === "granted") {
-          PushNotifications.register();
-        }
-      });
+  const normalizeEmail = (email = "") => email.trim().toLowerCase();
+  const normalizeName = (name = "") => name.trim().toLowerCase();
+  const isValidEmail = (email) =>
+    !email || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+  const isSamePerson = (a, b) => {
+    if (!a || !b) return false;
+    const emailA = normalizeEmail(a.email);
+    const emailB = normalizeEmail(b.email);
+    return a.id === b.id || (!!emailA && emailA === emailB);
+  };
+  const dedupeContacts = (list) => {
+    const seen = new Set();
+    return list.filter((contact) => {
+      const key =
+        normalizeEmail(contact.email) ||
+        contact.id ||
+        `name:${normalizeName(contact.name)}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+  const normalizeGroupList = (list = []) =>
+    list.reduce(
+      (acc, group) => (group?.id ? upsertGroupList(acc, group) : acc),
+      [],
+    );
+  const normalizeContactList = (list = []) => dedupeContacts(list || []);
+  const getDisplayNameFromUser = (u = user) =>
+    u?.displayName || u?.email?.split("@")[0] || "Tôi";
+  const makeContactFromUser = (uid, data = {}) => ({
+    id: uid,
+    name: data.displayName || data.name || data.email?.split("@")[0] || "Bạn",
+    email: normalizeEmail(data.email),
+    photoURL: data.photoURL || "",
+    isRealAccount: true,
+    updatedAt: new Date().toISOString(),
+  });
+  const makeCurrentUserContact = () =>
+    makeContactFromUser(user?.uid, {
+      displayName: getDisplayNameFromUser(),
+      email: user?.email || "",
+      photoURL: user?.photoURL || "",
+    });
+  const makeGroupInfo = (id, data = {}) => ({
+    id,
+    name: data.name || "Nhóm không tên",
+    icon: data.icon || "💰",
+  });
+  const upsertById = (list = [], item) => [
+    ...list.filter((entry) => entry?.id !== item?.id),
+    item,
+  ];
+  const upsertGroupList = (list = [], groupInfo) =>
+    upsertById(list, groupInfo).filter((group) => group?.id);
+  const upsertContactList = (list = [], contact) =>
+    dedupeContacts([
+      ...list.filter((entry) => !isSamePerson(entry, contact)),
+      contact,
+    ]);
+  const removeContactFromList = (list = [], contact) =>
+    list.filter((entry) => !isSamePerson(entry, contact));
+  const updateUserListField = async (uid, field, updater) => {
+    if (!uid) return [];
+    const userRef = doc(db, "users", uid);
+    const userSnap = await getDoc(userRef);
+    const userData = userSnap.exists() ? userSnap.data() : {};
+    const currentList = Array.isArray(userData[field]) ? userData[field] : [];
+    const nextList = updater(currentList, userData);
+    await setDoc(userRef, { [field]: nextList }, { merge: true });
+    return nextList;
+  };
+  const addGroupToUser = (uid, groupInfo) =>
+    updateUserListField(uid, "joinedGroups", (list) =>
+      upsertGroupList(list, groupInfo),
+    );
+  const addContactToUser = (uid, contact) =>
+    updateUserListField(uid, "contacts", (list) =>
+      upsertContactList(list, contact),
+    );
+  const findUserAccountByEmail = async (email) => {
+    const emailKey = normalizeEmail(email);
+    if (!emailKey) return null;
 
-      PushNotifications.addListener("registration", (token) => {
-        console.log("Push registration success, token: " + token.value);
-        // Lưu token này lên server nếu muốn nhận thông báo từ xa
-      });
+    const usersRef = collection(db, "users");
+    const exactQuery = query(usersRef, where("email", "==", emailKey));
+    const exactSnap = await getDocs(exactQuery);
+    if (!exactSnap.empty) {
+      const userDoc = exactSnap.docs[0];
+      return { id: userDoc.id, data: userDoc.data() };
+    }
 
-      // Tìm đoạn listener "registration" và sửa lại thế này:
-      PushNotifications.addListener("registration", async (token) => {
-        console.log("Thiết bị đã cấp Token:", token.value);
-
-        if (auth.currentUser) {
-          const uid = auth.currentUser.uid;
-
-          // 1. Cập nhật Firestore
-          await setDoc(
-            doc(db, "users", uid),
-            { fcmToken: token.value },
-            { merge: true },
-          );
-
-          // 2. [QUAN TRỌNG]: ÉP ĐỒNG BỘ SANG CLOUDFLARE KV
-          try {
-            // Lấy dữ liệu hiện tại từ Cloudflare
-            const res = await fetch(`${API_URL}?uid=${uid}`);
-            let userData = { people: [], expenses: [] };
-            if (res.ok) {
-              userData = await res.json();
-            }
-
-            // Kiểm tra nếu Token trong KV khác với Token máy vừa cấp thì mới update
-            if (userData.fcmToken !== token.value) {
-              await fetch(`${API_URL}?uid=${uid}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ ...userData, fcmToken: token.value }),
-              });
-              console.log(
-                "Đã vá lỗi thiếu Token trên Cloudflare KV thành công!",
-              );
-            }
-          } catch (e) {
-            console.error("Lỗi khi vá Token sang Cloudflare:", e);
-          }
-        }
-      });
-
-      PushNotifications.addListener(
-        "pushNotificationReceived",
-        (notification) => {
-          playBuzzSound(); // <--- GỌI ÂM THANH Ở ĐÂY (MÁY NGƯỜI NHẬN SẼ KÊU)
-          showToast(`Buzz: ${notification.title || "Bạn bị đòi nợ!"}`, "buzz");
-        },
+    const allUsersSnap = await getDocs(usersRef);
+    const matchedDoc = allUsersSnap.docs.find(
+      (userDoc) => normalizeEmail(userDoc.data().email) === emailKey,
+    );
+    return matchedDoc ? { id: matchedDoc.id, data: matchedDoc.data() } : null;
+  };
+  const replaceExpenseMemberId = (expense, fromId, toId) => {
+    const nextExpense = { ...expense };
+    if (nextExpense.payerId === fromId) nextExpense.payerId = toId;
+    if (Array.isArray(nextExpense.sharedWith)) {
+      nextExpense.sharedWith = nextExpense.sharedWith.map((id) =>
+        id === fromId ? toId : id,
       );
     }
-  }, []);
+    if (Array.isArray(nextExpense.settledBy)) {
+      nextExpense.settledBy = [
+        ...new Set(
+          nextExpense.settledBy.map((id) => (id === fromId ? toId : id)),
+        ),
+      ];
+    }
+    if (
+      nextExpense.customShares &&
+      nextExpense.customShares[fromId] !== undefined
+    ) {
+      const fromValue = parseFloat(nextExpense.customShares[fromId] || 0);
+      const existingValue = parseFloat(nextExpense.customShares[toId] || 0);
+      nextExpense.customShares = {
+        ...nextExpense.customShares,
+        [toId]: existingValue + fromValue,
+      };
+      delete nextExpense.customShares[fromId];
+    }
+    return nextExpense;
+  };
+  const mergeMemberIntoGroupData = (groupData, oldId, realMember) => {
+    const members = groupData.members || [];
+    const expenses = groupData.expenses || [];
+    const hasRealMember = members.some((member) => member.id === realMember.id);
+    const nextMembers = members
+      .filter((member) => member.id !== oldId && member.id !== realMember.id)
+      .concat({
+        ...(members.find((member) => member.id === oldId) || {}),
+        ...(hasRealMember
+          ? members.find((member) => member.id === realMember.id)
+          : {}),
+        ...realMember,
+      });
+
+    return {
+      members: nextMembers,
+      expenses: expenses.map((expense) =>
+        replaceExpenseMemberId(expense, oldId, realMember.id),
+      ),
+    };
+  };
+
+  // --- PUSH NOTIFICATION TOKEN: một nguồn đăng ký duy nhất, có fallback qua Buzz inbox ---
+  useEffect(() => {
+    if (!user || !Capacitor.isNativePlatform()) return;
+
+    let isActive = true;
+    const listenerHandles = [];
+    const platform = Capacitor.getPlatform();
+    const pushProvider = platform === "ios" ? "apns" : "fcm";
+
+    const savePushToken = async (token) => {
+      if (!isActive || !token?.value) return;
+
+      const pushPayload = {
+        pushToken: token.value,
+        fcmToken: token.value, // Giữ field cũ để backend hiện tại không bị gãy.
+        pushProvider,
+        pushPlatform: platform,
+        pushEnabled: true,
+        pushUpdatedAt: new Date().toISOString(),
+      };
+
+      await setDoc(doc(db, "users", user.uid), pushPayload, { merge: true });
+
+      try {
+        const res = await fetch(`${API_URL}?uid=${user.uid}`);
+        let userData = { people: [], expenses: [] };
+        if (res.ok) userData = await res.json();
+        if (userData.fcmToken !== token.value) {
+          await fetch(`${API_URL}?uid=${user.uid}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ...userData, ...pushPayload }),
+          });
+        }
+      } catch (e) {
+        console.warn("Không đồng bộ được push token sang KV:", e);
+      }
+    };
+
+    const initPush = async () => {
+      try {
+        listenerHandles.push(
+          await PushNotifications.addListener("registration", savePushToken),
+        );
+        listenerHandles.push(
+          await PushNotifications.addListener("registrationError", async (err) => {
+            console.warn("Push registration error:", err);
+            await setDoc(
+              doc(db, "users", user.uid),
+              {
+                pushEnabled: false,
+                pushError: err?.error || String(err),
+                pushUpdatedAt: new Date().toISOString(),
+              },
+              { merge: true },
+            );
+          }),
+        );
+        listenerHandles.push(
+          await PushNotifications.addListener(
+            "pushNotificationReceived",
+            (notification) => {
+              playBuzzSound();
+              showToast(
+                notification?.body ||
+                  notification?.title ||
+                  "Bạn vừa nhận một Buzz!",
+                "buzz",
+              );
+            },
+          ),
+        );
+
+        let permission = await PushNotifications.checkPermissions();
+        if (permission.receive === "prompt") {
+          permission = await PushNotifications.requestPermissions();
+        }
+
+        if (permission.receive === "granted") {
+          await PushNotifications.register();
+        } else {
+          await setDoc(
+            doc(db, "users", user.uid),
+            {
+              pushEnabled: false,
+              pushError: "permission-denied",
+              pushUpdatedAt: new Date().toISOString(),
+            },
+            { merge: true },
+          );
+        }
+      } catch (e) {
+        console.warn("Không thể khởi tạo PushNotifications:", e);
+      }
+    };
+
+    initPush();
+
+    return () => {
+      isActive = false;
+      listenerHandles.forEach((handle) => handle?.remove?.());
+    };
+  }, [user]);
+
+  // --- BUZZ IN-APP FALLBACK ---
+  useEffect(() => {
+    if (!user) return;
+
+    const seenKey = `sm_last_buzz_at_${user.uid}`;
+    const fallbackSeenAt = Date.now() - 5 * 60 * 1000;
+    let lastSeenAt = Number(localStorage.getItem(seenKey) || fallbackSeenAt);
+
+    const unsub = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
+      if (!docSnap.exists()) return;
+
+      const buzzInbox = docSnap.data().buzzInbox || [];
+      const unreadBuzzes = buzzInbox
+        .filter((buzz) => {
+          const createdAt = new Date(buzz.createdAt || 0).getTime();
+          return (
+            buzz.type === "buzz" &&
+            buzz.fromId !== user.uid &&
+            createdAt > lastSeenAt
+          );
+        })
+        .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+
+      unreadBuzzes.forEach((buzz) => {
+        playBuzzSound();
+        showToast(
+          buzz.message ||
+            `${buzz.fromName || "Ai đó"} vừa Buzz bạn vào thanh toán!`,
+          "buzz",
+        );
+        lastSeenAt = Math.max(
+          lastSeenAt,
+          new Date(buzz.createdAt || Date.now()).getTime(),
+        );
+      });
+
+      if (unreadBuzzes.length > 0) {
+        localStorage.setItem(seenKey, String(lastSeenAt));
+      }
+    });
+
+    return () => unsub();
+  }, [user]);
   // --- EFFECT MỚI: XỬ LÝ VUỐT MÉP MÀN HÌNH ĐỂ BACK/FORWARD (ĐÃ TỐI ƯU HIỆU SUẤT) ---
   // 1. Tạo "Camera giám sát" trạng thái để không làm re-render sự kiện vuốt
   const uiStateRef = useRef({
@@ -4071,28 +4295,29 @@ export default function App() {
       if (currentUser) {
         // ... (Giữ nguyên phần lưu thông tin user lên Firestore của bạn)
         try {
-          await setDoc(
-            doc(db, "users", currentUser.uid),
-            {
-              email: currentUser.email,
-              displayName: currentUser.displayName || "",
-              photoURL: currentUser.photoURL || "",
-            },
-            { merge: true },
-          );
+          const userRef = doc(db, "users", currentUser.uid);
+          const userSnap = await getDoc(userRef);
+          const userData = userSnap.exists() ? userSnap.data() : {};
+          const userProfilePayload = {
+            email: normalizeEmail(currentUser.email),
+            displayName: currentUser.displayName || "",
+            photoURL: currentUser.photoURL || "",
+          };
+
+          if (!Array.isArray(userData.contacts)) userProfilePayload.contacts = [];
+          if (!Array.isArray(userData.joinedGroups))
+            userProfilePayload.joinedGroups = [];
+          if (!Array.isArray(userData.friendRequests))
+            userProfilePayload.friendRequests = [];
+
+          await setDoc(userRef, userProfilePayload, { merge: true });
         } catch (error) {
           console.error("Lỗi lưu thông tin user lên DB: ", error);
         }
 
         fetchDataFromServer(currentUser.uid);
 
-        if (Capacitor.isNativePlatform()) {
-          PushNotifications.requestPermissions().then((result) => {
-            if (result.receive === "granted") {
-              PushNotifications.register();
-            }
-          });
-        }
+        // PushNotifications được khởi tạo ở effect riêng theo user để tránh đăng ký listener trùng.
       }
 
       // --- ĐÃ SỬA: BỎ TOÀN BỘ SETTIMEOUT VÀ DELAY ---
@@ -4222,8 +4447,8 @@ export default function App() {
     const unsub = onSnapshot(doc(db, "users", user.uid), (docSnap) => {
       if (docSnap.exists()) {
         const userData = docSnap.data();
-        setMyGroups(userData.joinedGroups || []);
-        setContacts(userData.contacts || []);
+        setMyGroups(normalizeGroupList(userData.joinedGroups || []));
+        setContacts(normalizeContactList(userData.contacts || []));
         setFriendRequests(userData.friendRequests || []); // <--- THÊM DÒNG NÀY
       }
     });
@@ -4261,38 +4486,36 @@ export default function App() {
         let memberToAdd = {
           id: temp.id, // Mặc định dùng ID ảo từ danh bạ
           name: temp.name,
-          email: temp.email,
+          email: normalizeEmail(temp.email),
           photoURL: "",
           role: "member",
         };
 
         // Nếu có email, đi tìm tài khoản thật trên hệ thống
-        if (temp.email) {
-          const usersRef = collection(db, "users");
-          const q = query(usersRef, where("email", "==", temp.email));
-          const querySnapshot = await getDocs(q);
+        if (memberToAdd.email) {
+          const matchedAccount = await findUserAccountByEmail(memberToAdd.email);
 
-          if (!querySnapshot.empty) {
+          if (matchedAccount) {
             // TÌM THẤY TÀI KHOẢN THẬT
-            const userDoc = querySnapshot.docs[0];
-            const realUser = userDoc.data();
-            const realUid = userDoc.id;
+            const realUser = matchedAccount.data;
+            const realUid = matchedAccount.id;
 
             // Update thông tin thật
             memberToAdd = {
               ...memberToAdd,
               id: realUid, // Dùng UID thật
               name: realUser.displayName || temp.name,
+              email: normalizeEmail(realUser.email),
               photoURL: realUser.photoURL || "",
             };
 
             // --- ĐỒNG BỘ NGƯỢC: Thêm nhóm vào danh sách của họ ---
-            await updateDoc(doc(db, "users", realUid), {
-              joinedGroups: arrayUnion(groupInfo),
-            });
+            await addGroupToUser(realUid, groupInfo);
           }
         }
-        finalMembers.push(memberToAdd);
+        if (!finalMembers.some((member) => isSamePerson(member, memberToAdd))) {
+          finalMembers.push(memberToAdd);
+        }
       }
 
       // 3. Tạo document Group trên Firestore
@@ -4306,11 +4529,7 @@ export default function App() {
       });
 
       // 4. Thêm nhóm vào danh sách của TÔI
-      await setDoc(
-        doc(db, "users", user.uid),
-        { joinedGroups: arrayUnion(groupInfo) },
-        { merge: true },
-      );
+      await addGroupToUser(user.uid, groupInfo);
 
       // 5. Reset các ô nhập và đóng Modal (KHÔNG gọi setMyGroups ở đây)
       setGroupId(newGroupId);
@@ -4460,45 +4679,112 @@ export default function App() {
 
   // --- HÀM 2: GIA NHẬP NHÓM BẰNG MÃ (PHIÊN BẢN MỚI) ---
   const handleJoinGroup = async (inputGroupId) => {
-    if (!inputGroupId || !user) return; // Thêm check user
-    const groupRef = doc(db, "groups", inputGroupId);
-    const docSnap = await getDoc(groupRef);
+    const cleanGroupId = (inputGroupId || "").trim().toUpperCase();
+    if (!cleanGroupId || !user) return;
 
-    if (docSnap.exists()) {
-      const groupData = docSnap.data();
+    const groupRef = doc(db, "groups", cleanGroupId);
+    const groupSnap = await getDoc(groupRef);
 
-      // LOGIC MỚI: Thêm nhóm vào danh sách của User để hiện ở Sidebar
-      await setDoc(
-        doc(db, "users", user.uid),
-        {
-          joinedGroups: arrayUnion({
-            id: inputGroupId,
-            name: groupData.name || "Nhóm không tên",
-          }),
-        },
-        { merge: true },
+    if (!groupSnap.exists()) {
+      showToast("Mã nhóm không tồn tại!", "error");
+      return;
+    }
+
+    try {
+      const groupData = groupSnap.data();
+      const groupInfo = makeGroupInfo(cleanGroupId, groupData);
+      const currentMembers = groupData.members || [];
+      const currentUserMember = {
+        id: user.uid,
+        name: getDisplayNameFromUser(),
+        email: normalizeEmail(user.email),
+        photoURL: user.photoURL || "",
+        role: "member",
+      };
+
+      const matchedMember = currentMembers.find(
+        (member) =>
+          member.id === user.uid ||
+          (!!currentUserMember.email &&
+            normalizeEmail(member.email) === currentUserMember.email),
       );
 
-      // Thêm User vào danh sách members của Group (nếu chưa có)
-      const currentMembers = groupData.members || [];
-      const isMember = currentMembers.find((m) => m.id === user.uid);
+      let nextMembers = currentMembers;
+      let nextExpenses = groupData.expenses || [];
 
-      if (!isMember) {
-        await updateDoc(groupRef, {
-          members: arrayUnion({
-            id: user.uid,
-            name: user.displayName,
-            email: user.email,
-            photoURL: user.photoURL,
-          }),
-        });
+      if (matchedMember?.id && matchedMember.id !== user.uid) {
+        const merged = mergeMemberIntoGroupData(
+          groupData,
+          matchedMember.id,
+          currentUserMember,
+        );
+        nextMembers = merged.members;
+        nextExpenses = merged.expenses;
+      } else if (matchedMember?.id === user.uid) {
+        nextMembers = currentMembers.map((member) =>
+          member.id === user.uid ? { ...member, ...currentUserMember } : member,
+        );
+      } else {
+        nextMembers = [...currentMembers, currentUserMember];
       }
 
-      setGroupId(inputGroupId);
+      await updateDoc(groupRef, {
+        members: nextMembers,
+        expenses: nextExpenses,
+        updatedAt: new Date().toISOString(),
+      });
+
+      await addGroupToUser(user.uid, groupInfo);
+
+      const contactsFromGroup = currentMembers
+        .filter(
+          (member) =>
+            member.id !== user.uid &&
+            normalizeEmail(member.email) &&
+            !member.leftAt,
+        )
+        .map((member) =>
+          makeContactFromUser(member.id, {
+            displayName: member.name,
+            email: member.email,
+            photoURL: member.photoURL,
+          }),
+        );
+
+      if (contactsFromGroup.length > 0) {
+        const nextContacts = await updateUserListField(
+          user.uid,
+          "contacts",
+          (list) =>
+            contactsFromGroup.reduce(
+              (acc, contact) => upsertContactList(acc, contact),
+              list,
+            ),
+        );
+        setContacts(nextContacts);
+      }
+
+      for (const member of currentMembers) {
+        if (
+          member.id === user.uid ||
+          !normalizeEmail(member.email) ||
+          member.leftAt
+        ) {
+          continue;
+        }
+        const memberSnap = await getDoc(doc(db, "users", member.id));
+        if (memberSnap.exists()) {
+          await addContactToUser(member.id, makeCurrentUserContact());
+        }
+      }
+
+      setGroupId(cleanGroupId);
       setIsGroupMode(true);
-      showToast("Đã vào nhóm!", "success");
-    } else {
-      showToast("Mã nhóm không tồn tại!", "error");
+      setActiveTab("dashboard");
+      showToast("Đã vào nhóm và đồng bộ danh bạ nhóm!", "success");
+    } catch (e) {
+      console.error(e);
+      showToast("Lỗi tham gia nhóm: " + e.message, "error");
     }
   };
 
@@ -4695,6 +4981,206 @@ export default function App() {
     };
   }, [people, expenses, user, groupId]);
 
+  const groupLedger = useMemo(() => {
+    if (!user || !groupId) {
+      return {
+        rows: [],
+        settlementSuggestions: [],
+        totalPaid: 0,
+        totalShare: 0,
+      };
+    }
+
+    const ledgerMap = new Map();
+    const toRealId = (id) => (id === "me" ? user?.uid : id);
+    const currentDisplayName =
+      user?.displayName || user?.email?.split("@")[0] || "Tôi";
+    const getKnownMember = (id) =>
+      people.find((person) => toRealId(person.id) === id) ||
+      contacts.find((contact) => toRealId(contact.id) === id) ||
+      (id === user.uid
+        ? {
+            id: user.uid,
+            name: currentDisplayName,
+            email: user.email,
+            photoURL: user.photoURL,
+          }
+        : null);
+    const ensureLedgerRow = (rawId, fallback = {}) => {
+      const id = toRealId(rawId);
+      if (!id) return null;
+
+      if (!ledgerMap.has(id)) {
+        const known = getKnownMember(id) || fallback;
+        ledgerMap.set(id, {
+          id,
+          name:
+            known.name ||
+            known.displayName ||
+            known.email?.split("@")[0] ||
+            fallback.name ||
+            "Thành viên",
+          email: normalizeEmail(known.email || fallback.email || ""),
+          photoURL: known.photoURL || fallback.photoURL || "",
+          paid: 0,
+          share: 0,
+          receivable: 0,
+          payable: 0,
+        });
+      }
+
+      return ledgerMap.get(id);
+    };
+
+    people.forEach((person) => ensureLedgerRow(person.id, person));
+    ensureLedgerRow(user.uid, {
+      name: currentDisplayName,
+      email: user.email,
+      photoURL: user.photoURL,
+    });
+
+    expenses.forEach((exp) => {
+      const amount = parseFloat(exp.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) return;
+
+      const payerId = toRealId(exp.payerId) || exp.payerId;
+      const payerRow = ensureLedgerRow(payerId);
+      if (!payerRow) return;
+
+      payerRow.paid += amount;
+      const settledBy = new Set((exp.settledBy || []).map((id) => toRealId(id)));
+
+      if (exp.type === "custom") {
+        Object.entries(exp.customShares || {}).forEach(([rawDebtorId, value]) => {
+          const debtorId = toRealId(rawDebtorId);
+          const share = parseFloat(value || 0);
+          if (!debtorId || !Number.isFinite(share) || share <= 0) return;
+
+          const debtorRow = ensureLedgerRow(debtorId);
+          if (!debtorRow) return;
+
+          debtorRow.share += share;
+          if (debtorId !== payerId && !settledBy.has(debtorId)) {
+            payerRow.receivable += share;
+            debtorRow.payable += share;
+          }
+        });
+        return;
+      }
+
+      const sharedSlots = (exp.sharedWith || [])
+        .map((id) => toRealId(id))
+        .filter(Boolean);
+      const billableSlots =
+        exp.type === "full"
+          ? sharedSlots.filter((id) => id !== payerId)
+          : sharedSlots;
+
+      if (billableSlots.length === 0) return;
+      const sharePerSlot = amount / billableSlots.length;
+
+      billableSlots.forEach((debtorId) => {
+        const debtorRow = ensureLedgerRow(debtorId);
+        if (!debtorRow) return;
+
+        debtorRow.share += sharePerSlot;
+        if (debtorId !== payerId && !settledBy.has(debtorId)) {
+          payerRow.receivable += sharePerSlot;
+          debtorRow.payable += sharePerSlot;
+        }
+      });
+    });
+
+    const rows = Array.from(ledgerMap.values())
+      .map((row) => ({
+        ...row,
+        net: row.receivable - row.payable,
+      }))
+      .filter(
+        (row) =>
+          row.paid !== 0 ||
+          row.share !== 0 ||
+          row.receivable !== 0 ||
+          row.payable !== 0,
+      )
+      .sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
+
+    const creditors = rows
+      .filter((row) => row.net > 0)
+      .map((row) => ({ ...row, left: row.net }));
+    const debtors = rows
+      .filter((row) => row.net < 0)
+      .map((row) => ({ ...row, left: Math.abs(row.net) }));
+    const settlementSuggestions = [];
+    let debtorIndex = 0;
+    let creditorIndex = 0;
+
+    while (debtorIndex < debtors.length && creditorIndex < creditors.length) {
+      const debtor = debtors[debtorIndex];
+      const creditor = creditors[creditorIndex];
+      const amount = Math.min(debtor.left, creditor.left);
+
+      if (amount > 0.5) {
+        settlementSuggestions.push({
+          fromId: debtor.id,
+          fromName: debtor.name,
+          toId: creditor.id,
+          toName: creditor.name,
+          amount,
+        });
+      }
+
+      debtor.left -= amount;
+      creditor.left -= amount;
+      if (debtor.left <= 0.5) debtorIndex += 1;
+      if (creditor.left <= 0.5) creditorIndex += 1;
+    }
+
+    return {
+      rows,
+      settlementSuggestions,
+      totalPaid: rows.reduce((sum, row) => sum + row.paid, 0),
+      totalShare: rows.reduce((sum, row) => sum + row.share, 0),
+    };
+  }, [people, contacts, expenses, user, groupId]);
+
+  const copyGroupLedger = () => {
+    if (groupLedger.rows.length === 0) {
+      showToast("Chưa có dữ liệu thu/nợ để copy!", "info");
+      return;
+    }
+
+    const groupName = myGroups.find((g) => g.id === groupId)?.name || "Nhóm";
+    const lines = [`Bảng thu/nợ - ${groupName}`];
+
+    groupLedger.rows.forEach((row) => {
+      const status =
+        row.net > 0
+          ? `cần thu ${formatCurrency(row.net)}`
+          : row.net < 0
+          ? `cần trả ${formatCurrency(Math.abs(row.net))}`
+          : "đã cân";
+      lines.push(
+        `${row.name}: ứng ${formatCurrency(row.paid)}, phần ${formatCurrency(
+          row.share,
+        )}, ${status}`,
+      );
+    });
+
+    if (groupLedger.settlementSuggestions.length > 0) {
+      lines.push("", "Gợi ý chuyển khoản:");
+      groupLedger.settlementSuggestions.forEach((item) => {
+        lines.push(
+          `- ${item.fromName} -> ${item.toName}: ${formatCurrency(item.amount)}`,
+        );
+      });
+    }
+
+    navigator.clipboard.writeText(lines.join("\n")).then(() => {
+      showToast("Đã copy bảng thu/nợ!", "success");
+    });
+  };
+
   // --- BIẾN HIỂN THỊ (TỰ ĐỘNG SWITCH GIỮA GROUP VÀ GLOBAL) ---
   const displayNetBalance = groupId ? groupStats.net : globalStats.netWorth;
   const displayReceivable = groupId
@@ -4704,52 +5190,94 @@ export default function App() {
 
   const [editingContact, setEditingContact] = useState(null);
 
-  // --- 1. GỬI LỜI MỜI KẾT BẠN ---
-  const sendFriendRequest = async () => {
-    const emailToSearch = newPersonEmail.trim();
-    if (!emailToSearch)
-      return showToast("Vui lòng nhập Email để tìm kiếm!", "error");
-    if (emailToSearch === user.email)
-      return showToast("Không thể tự kết bạn với chính mình!", "error");
+  const sendFriendRequestToUser = async (targetUser) => {
+    if (!user || !targetUser?.id) return false;
+
+    const targetEmail = normalizeEmail(targetUser.email);
+    const myEmail = normalizeEmail(user.email);
+    const targetContact = makeContactFromUser(targetUser.id, {
+      displayName: targetUser.name || targetUser.displayName,
+      email: targetEmail,
+      photoURL: targetUser.photoURL,
+    });
+
+    if (targetUser.id === user.uid || (!!targetEmail && targetEmail === myEmail)) {
+      showToast("Không thể tự kết bạn với chính mình!", "error");
+      return false;
+    }
+
+    if (contacts.some((contact) => isSamePerson(contact, targetContact))) {
+      showToast("Hai bạn đã là bạn bè rồi!", "info");
+      return false;
+    }
 
     try {
-      // Tìm user trên hệ thống
-      const usersRef = collection(db, "users");
-      const q = query(usersRef, where("email", "==", emailToSearch));
-      const snap = await getDocs(q);
+      const targetRef = doc(db, "users", targetUser.id);
+      const targetSnap = await getDoc(targetRef);
 
-      if (snap.empty) {
-        return showToast(
-          "Không tìm thấy tài khoản nào với Email này!",
-          "error",
+      if (!targetSnap.exists()) {
+        showToast("Tài khoản này không còn tồn tại.", "error");
+        return false;
+      }
+
+      const targetData = targetSnap.data();
+      const targetContacts = targetData.contacts || [];
+      const currentUserContact = makeCurrentUserContact();
+
+      if (
+        targetContacts.some((contact) => isSamePerson(contact, currentUserContact))
+      ) {
+        const nextContacts = upsertContactList(contacts, targetContact);
+        await setDoc(
+          doc(db, "users", user.uid),
+          { contacts: nextContacts },
+          { merge: true },
         );
+        setContacts(nextContacts);
+        showToast("Hai bạn đã là bạn bè, đã đồng bộ lại danh bạ.", "success");
+        return true;
       }
 
-      const targetUid = snap.docs[0].id;
+      const pendingRequests = Array.isArray(targetData.friendRequests)
+        ? targetData.friendRequests
+        : [];
+      const hasPendingRequest = pendingRequests.some(
+        (req) => req.id === user.uid || normalizeEmail(req.email) === myEmail,
+      );
 
-      // Kiểm tra xem đã là bạn bè chưa
-      if (contacts.some((c) => c.id === targetUid)) {
-        return showToast("Hai bạn đã là bạn bè rồi!", "info");
+      if (hasPendingRequest) {
+        showToast("Lời mời đã được gửi trước đó.", "info");
+        return false;
       }
 
-      // Đẩy lời mời vào hộp thư của người kia
       const requestData = {
         id: user.uid,
-        name: user.displayName || user.email.split("@")[0],
-        email: user.email,
+        name: getDisplayNameFromUser(),
+        email: myEmail,
         photoURL: user.photoURL || "",
         timestamp: new Date().toISOString(),
       };
 
-      await updateDoc(doc(db, "users", targetUid), {
-        friendRequests: arrayUnion(requestData),
-      });
+      await setDoc(
+        targetRef,
+        {
+          friendRequests: [
+            ...pendingRequests.filter(
+              (req) =>
+                req.id !== user.uid && normalizeEmail(req.email) !== myEmail,
+            ),
+            requestData,
+          ],
+        },
+        { merge: true },
+      );
 
-      showToast("Đã gửi lời mời kết bạn!", "success");
-      setNewPersonEmail(""); // Xóa ô nhập
+      showToast(`Đã gửi lời mời đến ${targetContact.name}!`, "success");
+      return true;
     } catch (e) {
       console.error(e);
       showToast("Lỗi gửi lời mời: " + e.message, "error");
+      return false;
     }
   };
 
@@ -4813,21 +5341,7 @@ export default function App() {
 
   // --- 2. HÀM GỬI LỜI MỜI (DÀNH CHO NÚT KẾT BẠN TRONG TÌM KIẾM) ---
   const handleAddFriendFromSearch = async (targetUser) => {
-    try {
-      const requestData = {
-        id: user.uid,
-        name: user.displayName || user.email.split("@")[0],
-        email: user.email,
-        photoURL: user.photoURL || "",
-        timestamp: new Date().toISOString(),
-      };
-      await updateDoc(doc(db, "users", targetUser.id), {
-        friendRequests: arrayUnion(requestData),
-      });
-      showToast(`Đã gửi lời mời đến ${targetUser.name}!`, "success");
-    } catch (e) {
-      showToast("Lỗi gửi lời mời: " + e.message, "error");
-    }
+    await sendFriendRequestToUser(targetUser);
   };
 
   // --- 3. HÀM HỦY KẾT BẠN (UNFRIEND) ---
@@ -4839,8 +5353,15 @@ export default function App() {
         "Bạn có chắc muốn hủy kết bạn? Người này sẽ bị xóa khỏi danh bạ của bạn.",
       onConfirm: async () => {
         try {
+          const friendContact =
+            contacts.find((contact) => contact.id === friendId) || {
+              id: friendId,
+            };
           // Xóa khỏi danh bạ của MÌNH
-          const myUpdatedContacts = contacts.filter((c) => c.id !== friendId);
+          const myUpdatedContacts = removeContactFromList(
+            contacts,
+            friendContact,
+          );
           await setDoc(
             doc(db, "users", user.uid),
             { contacts: myUpdatedContacts },
@@ -4852,8 +5373,9 @@ export default function App() {
           const friendSnap = await getDoc(friendRef);
           if (friendSnap.exists()) {
             const theirContacts = friendSnap.data().contacts || [];
-            const theirUpdatedContacts = theirContacts.filter(
-              (c) => c.id !== user.uid,
+            const theirUpdatedContacts = removeContactFromList(
+              theirContacts,
+              makeCurrentUserContact(),
             );
             await updateDoc(friendRef, { contacts: theirUpdatedContacts });
           }
@@ -4876,9 +5398,18 @@ export default function App() {
 
     try {
       // 1. SỬA Ở ĐÂY: Xóa tài khoản ảo VÀ đánh dấu tài khoản thật là "isLinked: true"
-      const updatedContacts = contacts
-        .filter((c) => c.id !== fakeId)
-        .map((c) => (c.id === realId ? { ...c, isLinked: true } : c));
+      const realContact = {
+        ...makeContactFromUser(realId, {
+          displayName: realFriend.name,
+          email: realFriend.email,
+          photoURL: realFriend.photoURL,
+        }),
+        isLinked: true,
+      };
+      const updatedContacts = upsertContactList(
+        contacts.filter((c) => c.id !== fakeId),
+        realContact,
+      );
 
       await setDoc(
         doc(db, "users", user.uid),
@@ -4894,63 +5425,27 @@ export default function App() {
 
         if (groupSnap.exists()) {
           const groupData = groupSnap.data();
-          let groupMembers = groupData.members || [];
-          let groupExpenses = groupData.expenses || [];
-
           // Nếu tài khoản ảo có trong nhóm này
-          if (groupMembers.some((m) => m.id === fakeId)) {
-            // A. Đổi ID trong danh sách thành viên
-            groupMembers = groupMembers.map((m) =>
-              m.id === fakeId
-                ? {
-                    ...m,
-                    id: realId,
-                    name: realFriend.name,
-                    photoURL: realFriend.photoURL,
-                    email: realFriend.email,
-                  }
-                : m,
+          if ((groupData.members || []).some((m) => m.id === fakeId)) {
+            const mergedGroup = mergeMemberIntoGroupData(
+              groupData,
+              fakeId,
+              {
+                ...realContact,
+                role: "member",
+              },
             );
-
-            // B. Đổi ID trong toàn bộ lịch sử giao dịch
-            groupExpenses = groupExpenses.map((exp) => {
-              let newExp = { ...exp };
-              if (newExp.payerId === fakeId) newExp.payerId = realId;
-              if (newExp.sharedWith?.includes(fakeId)) {
-                newExp.sharedWith = newExp.sharedWith.map((id) =>
-                  id === fakeId ? realId : id,
-                );
-              }
-              if (newExp.settledBy?.includes(fakeId)) {
-                newExp.settledBy = newExp.settledBy.map((id) =>
-                  id === fakeId ? realId : id,
-                );
-              }
-              if (
-                newExp.customShares &&
-                newExp.customShares[fakeId] !== undefined
-              ) {
-                newExp.customShares[realId] = newExp.customShares[fakeId];
-                delete newExp.customShares[fakeId];
-              }
-              return newExp;
-            });
 
             // C. Lưu lên DB
             await updateDoc(groupRef, {
-              members: groupMembers,
-              expenses: groupExpenses,
+              members: mergedGroup.members,
+              expenses: mergedGroup.expenses,
+              updatedAt: new Date().toISOString(),
             });
 
             // D. Bắn nhóm này cho người bạn thật để họ thấy
-            const groupInfoForFriend = {
-              id: g.id,
-              name: groupData.name || "Nhóm",
-              icon: groupData.icon || "💰",
-            };
-            await updateDoc(doc(db, "users", realId), {
-              joinedGroups: arrayUnion(groupInfoForFriend),
-            });
+            await addGroupToUser(realId, makeGroupInfo(g.id, groupData));
+            await addContactToUser(realId, makeCurrentUserContact());
           }
         }
       }
@@ -4967,21 +5462,29 @@ export default function App() {
 
   // --- HÀM MỚI: THÊM LIÊN HỆ KHÔNG CẦN EMAIL ---
   const handleAddLocalContact = async () => {
-    if (!newLocalContactName.trim()) {
+    const contactName = newLocalContactName.trim();
+    if (!contactName) {
       return showToast("Vui lòng nhập tên người muốn thêm!", "error");
     }
     if (!user) return showToast("Vui lòng đăng nhập!", "error");
 
+    const duplicatedContact = contacts.find(
+      (c) => !c.email && normalizeName(c.name) === normalizeName(contactName),
+    );
+    if (duplicatedContact) {
+      return showToast("Người này đã có trong danh bạ rồi!", "info");
+    }
+
     try {
       const newContact = {
         id: uuidv4(), // Tạo một ID ảo
-        name: newLocalContactName.trim(),
+        name: contactName,
         email: "", // Bỏ trống email
         photoURL: "",
         createdAt: new Date().toISOString(),
       };
 
-      const updatedList = [...contacts, newContact];
+      const updatedList = dedupeContacts([...contacts, newContact]);
 
       // Lưu lên Firestore
       await setDoc(
@@ -4999,160 +5502,142 @@ export default function App() {
     }
   };
 
+  const handleAddDirectMemberToGroup = async () => {
+    if (!groupId) return showToast("Bạn cần chọn nhóm trước.", "error");
+    if (!user) return showToast("Vui lòng đăng nhập!", "error");
+
+    const memberName = newPersonName.trim();
+    const memberEmail = normalizeEmail(newPersonEmail);
+    if (!memberName) {
+      return showToast("Nhập tên thành viên trước đã.", "error");
+    }
+    if (!isValidEmail(memberEmail)) {
+      return showToast("Email chưa đúng định dạng.", "error");
+    }
+
+    const existingContact =
+      contacts.find(
+        (c) => memberEmail && normalizeEmail(c.email) === memberEmail,
+      ) ||
+      contacts.find((c) => normalizeName(c.name) === normalizeName(memberName));
+
+    const contactToAdd = existingContact
+      ? {
+          ...existingContact,
+          name: existingContact.name || memberName,
+          email: normalizeEmail(existingContact.email) || memberEmail,
+        }
+      : {
+          id: uuidv4(),
+          name: memberName,
+          email: memberEmail,
+          photoURL: "",
+          createdAt: new Date().toISOString(),
+        };
+
+    const alreadyInGroup = people.some(
+      (p) =>
+        isSamePerson(p, contactToAdd) ||
+        (!memberEmail && normalizeName(p.name) === normalizeName(memberName)),
+    );
+    if (alreadyInGroup) {
+      return showToast("Người này đã ở trong nhóm rồi!", "info");
+    }
+
+    setIsAddingGroupMember(true);
+    try {
+      const nextContacts = dedupeContacts([
+        ...contacts.filter((c) => !isSamePerson(c, contactToAdd)),
+        contactToAdd,
+      ]);
+
+      await setDoc(
+        doc(db, "users", user.uid),
+        { contacts: nextContacts },
+        { merge: true },
+      );
+      setContacts(nextContacts);
+
+      const added = await addContactToGroup(contactToAdd);
+      if (added) {
+        setNewPersonName("");
+        setNewPersonEmail("");
+      }
+    } catch (e) {
+      console.error(e);
+      showToast("Lỗi thêm thành viên: " + e.message, "error");
+    } finally {
+      setIsAddingGroupMember(false);
+    }
+  };
+
   // --- 2. CHẤP NHẬN LỜI MỜI (ĐỒNG BỘ TOÀN DIỆN DANH BẠ & NHÓM CŨ) ---
   const handleAcceptRequest = async (requester) => {
     if (!user) return;
     try {
-      // A. Xóa khỏi danh sách chờ
-      const updatedRequests = friendRequests.filter(
-        (req) => req.id !== requester.id,
-      );
-
-      // B. XỬ LÝ DANH BẠ CỦA MÌNH (GỘP NẾU TRÙNG EMAIL)
-      let myUpdatedContacts = [...contacts];
-      const existingIndex = myUpdatedContacts.findIndex(
-        (c) => c.email === requester.email,
-      );
-      let oldFakeId = null;
-
-      const newContactForMe = {
-        id: requester.id, // ID thật của Firebase
-        name: requester.name,
+      const requesterContact = makeContactFromUser(requester.id, {
+        displayName: requester.name,
         email: requester.email,
-        photoURL: requester.photoURL || "",
-        createdAt: new Date().toISOString(),
-      };
-
-      if (existingIndex >= 0) {
-        oldFakeId = myUpdatedContacts[existingIndex].id; // Lưu lại ID ảo cũ để đi tìm trong các nhóm
-        myUpdatedContacts[existingIndex] = {
-          ...myUpdatedContacts[existingIndex],
-          ...newContactForMe,
-        };
-      } else {
-        myUpdatedContacts.push(newContactForMe);
-      }
-
-      await updateDoc(doc(db, "users", user.uid), {
-        friendRequests: updatedRequests,
-        contacts: myUpdatedContacts,
+        photoURL: requester.photoURL,
       });
+      const existingContact = contacts.find((contact) =>
+        isSamePerson(contact, requesterContact),
+      );
+      const oldFakeId =
+        existingContact?.id && existingContact.id !== requester.id
+          ? existingContact.id
+          : null;
 
-      // C. XỬ LÝ DANH BẠ CỦA NGƯỜI KIA
-      const requesterRef = doc(db, "users", requester.id);
-      const requesterSnap = await getDoc(requesterRef);
+      const updatedRequests = friendRequests.filter(
+        (req) => !isSamePerson(req, requesterContact),
+      );
+      const myUpdatedContacts = upsertContactList(contacts, requesterContact);
 
-      if (requesterSnap.exists()) {
-        let requesterContacts = requesterSnap.data().contacts || [];
-        const meIndexInTheirs = requesterContacts.findIndex(
-          (c) => c.email === user.email,
-        );
+      await setDoc(
+        doc(db, "users", user.uid),
+        {
+          friendRequests: updatedRequests,
+          contacts: myUpdatedContacts,
+        },
+        { merge: true },
+      );
+      await addContactToUser(requester.id, makeCurrentUserContact());
 
-        const myInfoForThem = {
-          id: user.uid,
-          name: user.displayName || user.email.split("@")[0],
-          email: user.email,
-          photoURL: user.photoURL || "",
-          createdAt: new Date().toISOString(),
-        };
-
-        if (meIndexInTheirs >= 0) {
-          requesterContacts[meIndexInTheirs] = {
-            ...requesterContacts[meIndexInTheirs],
-            ...myInfoForThem,
-          };
-        } else {
-          requesterContacts.push(myInfoForThem);
-        }
-
-        await updateDoc(requesterRef, { contacts: requesterContacts });
-      }
-
-      // ==========================================
-      // D. NÂNG CẤP: ĐỒNG BỘ ID VÀO CÁC NHÓM CŨ ĐÃ THAM GIA
-      // ==========================================
-      // Nếu phát hiện ra có ID ảo cũ (nhập tay) và ID này khác với ID thật
       if (oldFakeId && oldFakeId !== requester.id) {
-        // Duyệt qua tất cả các nhóm của bạn
         for (const g of myGroups) {
           const groupRef = doc(db, "groups", g.id);
           const groupSnap = await getDoc(groupRef);
 
           if (groupSnap.exists()) {
             const groupData = groupSnap.data();
-            let members = groupData.members || [];
-            let expenses = groupData.expenses || [];
+            const hasFakeMember = (groupData.members || []).some(
+              (member) => member.id === oldFakeId,
+            );
 
-            // Kiểm tra xem nhóm này có Thu Hà (ảo) không?
-            const memberIndex = members.findIndex((m) => m.id === oldFakeId);
+            if (hasFakeMember) {
+              const mergedGroup = mergeMemberIntoGroupData(
+                groupData,
+                oldFakeId,
+                {
+                  ...requesterContact,
+                  role: "member",
+                },
+              );
 
-            if (memberIndex >= 0) {
-              // 1. Cập nhật thành viên: Thay ID ảo bằng ID thật, cập nhật Avatar
-              members[memberIndex] = {
-                ...members[memberIndex],
-                id: requester.id,
-                photoURL: requester.photoURL || "",
-                name: requester.name, // Lấy tên thật của họ
-              };
-
-              // 2. Cập nhật Lịch sử giao dịch: Tìm tất cả chỗ nào có ID ảo -> Đổi thành ID thật
-              const updatedExpenses = expenses.map((exp) => {
-                let newExp = { ...exp };
-
-                // Đổi người trả tiền
-                if (newExp.payerId === oldFakeId) newExp.payerId = requester.id;
-
-                // Đổi người tham gia (chia tiền)
-                if (
-                  newExp.sharedWith &&
-                  newExp.sharedWith.includes(oldFakeId)
-                ) {
-                  newExp.sharedWith = newExp.sharedWith.map((id) =>
-                    id === oldFakeId ? requester.id : id,
-                  );
-                }
-
-                // Đổi người đã xác nhận trả (settled)
-                if (newExp.settledBy && newExp.settledBy.includes(oldFakeId)) {
-                  newExp.settledBy = newExp.settledBy.map((id) =>
-                    id === oldFakeId ? requester.id : id,
-                  );
-                }
-
-                // Đổi Object chia tiền chi tiết (customShares)
-                if (
-                  newExp.customShares &&
-                  newExp.customShares[oldFakeId] !== undefined
-                ) {
-                  newExp.customShares[requester.id] =
-                    newExp.customShares[oldFakeId];
-                  delete newExp.customShares[oldFakeId];
-                }
-
-                return newExp;
-              });
-
-              // 3. Lưu toàn bộ dữ liệu Nhóm mới lên Firebase
               await updateDoc(groupRef, {
-                members: members,
-                expenses: updatedExpenses,
+                members: mergedGroup.members,
+                expenses: mergedGroup.expenses,
+                updatedAt: new Date().toISOString(),
               });
 
-              // 4. BẮN NHÓM NÀY SANG CHO NGƯỜI KIA (Để họ thấy nhóm cũ ngay lập tức)
-              const groupInfoForFriend = {
-                id: g.id,
-                name: groupData.name || "Nhóm",
-                icon: groupData.icon || "💰",
-              };
-
-              await updateDoc(doc(db, "users", requester.id), {
-                joinedGroups: arrayUnion(groupInfoForFriend),
-              });
+              await addGroupToUser(requester.id, makeGroupInfo(g.id, groupData));
             }
           }
         }
       }
 
+      setFriendRequests(updatedRequests);
+      setContacts(myUpdatedContacts);
       showToast("Đã đồng bộ toàn bộ bạn bè và nhóm thành công!", "success");
     } catch (e) {
       console.error("Lỗi đồng bộ:", e);
@@ -5346,54 +5831,59 @@ export default function App() {
   // --- HÀM 2: CHỌN BẠN TỪ DANH BẠ ĐỂ THÊM VÀO NHÓM ---
   // --- HÀM THÊM THÀNH VIÊN VÀO NHÓM (CÓ ĐỒNG BỘ 2 CHIỀU & LẤY AVATAR THẬT) ---
   const addContactToGroup = async (contact) => {
-    if (!groupId) return;
+    if (!groupId) return false;
+
+    const contactEmail = normalizeEmail(contact.email);
+    const isLocalNameDuplicate = (member) =>
+      !contactEmail && normalizeName(member.name) === normalizeName(contact.name);
 
     // 1. Check xem đã có trong nhóm chưa
-    if (people.some((p) => p.id === contact.id)) {
-      return showToast("Người này đã ở trong nhóm rồi!", "info");
+    if (people.some((p) => isSamePerson(p, contact) || isLocalNameDuplicate(p))) {
+      showToast("Người này đã ở trong nhóm rồi!", "info");
+      return false;
     }
 
     try {
       let realMemberData = {
         id: contact.id, // Giữ ID từ danh bạ (nếu contact này là user ảo)
         name: contact.name,
-        email: contact.email,
-        photoURL: "",
+        email: contactEmail,
+        photoURL: contact.photoURL || "",
         role: "member",
       };
 
       // 2. TÌM KIẾM TÀI KHOẢN THẬT DỰA TRÊN EMAIL
-      if (contact.email) {
-        const usersRef = collection(db, "users");
-        const q = query(usersRef, where("email", "==", contact.email));
-        const querySnapshot = await getDocs(q);
+      if (contactEmail) {
+        const matchedAccount = await findUserAccountByEmail(contactEmail);
 
-        if (!querySnapshot.empty) {
+        if (matchedAccount) {
           // A. NẾU TÌM THẤY TÀI KHOẢN THẬT
-          const userDoc = querySnapshot.docs[0];
-          const userData = userDoc.data();
-          const realUid = userDoc.id;
+          const userData = matchedAccount.data;
+          const realUid = matchedAccount.id;
+
+          if (realUid === user?.uid) {
+            showToast("Bạn đã là thành viên của nhóm này rồi!", "info");
+            return false;
+          }
 
           // Cập nhật thông tin thành viên bằng thông tin thật từ account
           realMemberData = {
             id: realUid, // Dùng UID thật để liên kết
             name: userData.displayName || contact.name, // Ưu tiên tên hiển thị của họ
-            email: userData.email,
+            email: normalizeEmail(userData.email),
             photoURL: userData.photoURL || "", // LẤY AVATAR THẬT CỦA HỌ
             role: "member",
           };
 
           // --- ĐỒNG BỘ NGƯỢC: THÊM NHÓM VÀO LIST CỦA HỌ ---
           // Để khi họ đăng nhập, họ sẽ thấy nhóm này ngay lập tức
-          const groupInfoForFriend = {
-            id: groupId,
-            name: myGroups.find((g) => g.id === groupId)?.name || "Nhóm mới",
-            role: "member",
-          };
+          const groupInfoForFriend = makeGroupInfo(
+            groupId,
+            myGroups.find((g) => g.id === groupId) || { name: "Nhóm mới" },
+          );
 
-          await updateDoc(doc(db, "users", realUid), {
-            joinedGroups: arrayUnion(groupInfoForFriend),
-          });
+          await addGroupToUser(realUid, groupInfoForFriend);
+          await addContactToUser(realUid, makeCurrentUserContact());
 
           showToast(
             `Đã liên kết với tài khoản ${userData.displayName || "bạn bè"}!`,
@@ -5409,29 +5899,48 @@ export default function App() {
         const currentMembers = snap.data().members || [];
 
         // Kiểm tra lần cuối xem UID thật đã có trong nhóm chưa (đề phòng)
-        if (currentMembers.some((m) => m.id === realMemberData.id)) {
-          return showToast(
-            "Tài khoản này thực ra đã có trong nhóm rồi!",
-            "info",
-          );
+        if (
+          currentMembers.some(
+            (m) => isSamePerson(m, realMemberData) || isLocalNameDuplicate(m),
+          )
+        ) {
+          showToast("Tài khoản này thực ra đã có trong nhóm rồi!", "info");
+          return false;
         }
 
         await updateDoc(groupRef, {
           members: [...currentMembers, realMemberData],
+          updatedAt: new Date().toISOString(),
         });
         showToast(`Đã thêm ${realMemberData.name} vào nhóm`, "success");
+        return true;
       }
     } catch (e) {
       console.error(e);
       showToast("Lỗi thêm thành viên: " + e.message, "error");
+      return false;
     }
+    return false;
   };
 
   // Thay thế hàm deletePerson cũ bằng hàm này:
   const deletePerson = (id) => {
+    const targetPerson = people.find((p) => p.id === id);
+    const relatedExpenses = expenses.filter(
+      (e) => e.payerId === id || (e.sharedWith || []).includes(id),
+    );
+
+    if (relatedExpenses.length > 0) {
+      showToast(
+        `Không thể xóa ${targetPerson?.name || "thành viên"} vì còn ${relatedExpenses.length} giao dịch liên quan.`,
+        "error",
+      );
+      return;
+    }
+
     setConfirmDialog({
       isOpen: true,
-      message: "Lịch sử giao dịch liên quan cũng sẽ bị xóa.",
+      message: `Xóa ${targetPerson?.name || "thành viên này"} khỏi nhóm? Người này chưa có giao dịch liên quan nên công nợ sẽ không bị ảnh hưởng.`,
       title: "Xóa thành viên?",
       onConfirm: async () => {
         if (!groupId) return;
@@ -5440,15 +5949,10 @@ export default function App() {
           // 1. Lọc bỏ người này khỏi danh sách thành viên
           const newPeople = people.filter((p) => p.id !== id);
 
-          // 2. Lọc bỏ các giao dịch mà người này Trả hoặc Tham gia
-          const newExpenses = expenses.filter(
-            (e) => e.payerId !== id && !e.sharedWith.includes(id),
-          );
-
           // 3. Gửi cập nhật lên Server
           await updateDoc(doc(db, "groups", groupId), {
             members: newPeople,
-            expenses: newExpenses,
+            updatedAt: new Date().toISOString(),
           });
 
           if (selectedPersonId === id) setSelectedPersonId(null);
@@ -5498,50 +6002,88 @@ export default function App() {
 
   // --- LOGIC BUZZ (GIỤC NỢ) TỐI ƯU ---
   const handleBuzz = async (person) => {
-    if (!person.id) {
+    if (!person.id || person.id === user?.uid) {
       showToast(`Lỗi: Không tìm thấy ID của ${person.name}!`, "error");
       return;
     }
 
     try {
-      // 1. Kéo thẳng FCM Token của người nợ từ Firestore
       const userDocRef = doc(db, "users", person.id);
       const userSnap = await getDoc(userDocRef);
 
-      if (!userSnap.exists() || !userSnap.data().fcmToken) {
+      if (!userSnap.exists()) {
         showToast(
-          `Không thể Buzz! ${person.name} chưa cài app hoặc chưa bật thông báo.`,
-          "error",
+          `${person.name} chưa có tài khoản thật để nhận Buzz.`,
+          "info",
         );
         return;
       }
 
-      const targetFcmToken = userSnap.data().fcmToken;
+      const targetData = userSnap.data();
+      const groupInfo = myGroups.find((g) => g.id === groupId) || {};
+      const buzzEvent = {
+        id: uuidv4(),
+        type: "buzz",
+        fromId: user.uid,
+        fromName: getDisplayNameFromUser(),
+        targetId: person.id,
+        targetName: person.name,
+        groupId: groupId || "",
+        groupName: groupInfo.name || "",
+        message: `${getDisplayNameFromUser()} đang gọi bạn vào thanh toán!`,
+        createdAt: new Date().toISOString(),
+      };
 
-      // 2. Phát âm thanh ở máy mình trước cho vui tai
+      const nextBuzzInbox = [
+        ...(Array.isArray(targetData.buzzInbox) ? targetData.buzzInbox : []),
+        buzzEvent,
+      ].slice(-50);
+
+      await setDoc(userDocRef, { buzzInbox: nextBuzzInbox }, { merge: true });
+
       playBuzzSound();
-      showToast(`Đã BUZZ tới ${person.name}!`, "buzz");
 
-      // 3. Gửi Token thẳng lên Backend để đẩy thông báo
-      const response = await fetch(`${API_URL}/buzz`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          fcmToken: targetFcmToken, // Truyền thẳng token lên đây
-          title: "Bíp bíp! Đòi nợ!!! 💸",
-          body: `${
-            user.displayName || "Ai đó"
-          } đang gọi bạn vào thanh toán kìa!`,
-        }),
-      });
+      let pushSent = false;
+      const targetPushToken = targetData.pushToken || targetData.fcmToken;
+      if (targetPushToken) {
+        try {
+          const response = await fetch(`${API_URL}/buzz`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              fcmToken: targetPushToken,
+              pushToken: targetPushToken,
+              pushProvider: targetData.pushProvider || "unknown",
+              title: "Buzz Split Money",
+              body: buzzEvent.message,
+              data: {
+                type: "buzz",
+                groupId: buzzEvent.groupId,
+                groupName: buzzEvent.groupName,
+              },
+            }),
+          });
 
-      if (!response.ok) {
-        console.error("Backend phản hồi lỗi:", await response.text());
+          pushSent = response.ok;
+          if (!response.ok) {
+            console.error("Backend phản hồi lỗi:", await response.text());
+          }
+        } catch (pushError) {
+          console.warn("Không gửi được push hệ thống, đã dùng Buzz inbox:", pushError);
+        }
       }
+
+      showToast(
+        pushSent
+          ? `Đã Buzz tới ${person.name}!`
+          : `Đã gửi Buzz trong app cho ${person.name}.`,
+        "buzz",
+      );
     } catch (error) {
       console.error("Lỗi khi gọi API Buzz:", error);
+      showToast("Lỗi Buzz: " + error.message, "error");
     }
   };
 
@@ -5849,6 +6391,119 @@ export default function App() {
     );
   };
 
+  const renderGroupMemberAddPanel = ({ compact = false } = {}) => {
+    const availableContacts = contacts.filter(
+      (contact) =>
+        !people.some(
+          (person) =>
+            isSamePerson(person, contact) ||
+            (!contact.email &&
+              normalizeName(person.name) === normalizeName(contact.name)),
+        ),
+    );
+
+    const handleMemberInputKeyDown = (e) => {
+      if (e.key === "Enter" && newPersonName.trim() && !isAddingGroupMember) {
+        handleAddDirectMemberToGroup();
+      }
+    };
+
+    return (
+      <div className="bg-violet-50/50 p-4 md:p-6 rounded-2xl border border-blue-100 space-y-4">
+        <div className="flex items-center gap-2">
+          <div className="w-9 h-9 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center shrink-0">
+            <Plus size={18} strokeWidth={3} />
+          </div>
+          <div className="min-w-0">
+            <h3 className="font-bold text-indigo-700 text-sm md:text-base">
+              Thêm thành viên
+            </h3>
+            <p className="text-xs text-blue-400">
+              Nhập nhanh ngay trong nhóm, app sẽ lưu vào danh bạ luôn.
+            </p>
+          </div>
+        </div>
+
+        <div
+          className={`grid gap-2 ${
+            compact ? "grid-cols-1" : "grid-cols-1 md:grid-cols-[1fr_1fr_auto]"
+          }`}
+        >
+          <input
+            value={newPersonName}
+            onChange={(e) => setNewPersonName(e.target.value)}
+            onKeyDown={handleMemberInputKeyDown}
+            placeholder="Tên thành viên mới"
+            className="min-w-0 p-3 rounded-xl bg-white border border-violet-100 text-sm font-bold outline-none focus:ring-2 focus:ring-indigo-500/25"
+          />
+          <div className="relative min-w-0">
+            <Mail
+              size={16}
+              className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-300"
+            />
+            <input
+              value={newPersonEmail}
+              onChange={(e) => setNewPersonEmail(e.target.value)}
+              onKeyDown={handleMemberInputKeyDown}
+              placeholder="Email nếu có"
+              inputMode="email"
+              autoCapitalize="none"
+              className="w-full min-w-0 p-3 pl-9 rounded-xl bg-white border border-violet-100 text-sm outline-none focus:ring-2 focus:ring-indigo-500/25"
+            />
+          </div>
+          <button
+            onClick={handleAddDirectMemberToGroup}
+            disabled={!newPersonName.trim() || isAddingGroupMember}
+            className="px-4 py-3 bg-indigo-600 text-white rounded-xl text-sm font-black shadow-sm active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+          >
+            <Plus size={16} strokeWidth={3} />
+            {isAddingGroupMember ? "Đang thêm..." : "Thêm"}
+          </button>
+        </div>
+
+        <div className="pt-4 border-t border-blue-100">
+          <div className="flex items-center justify-between gap-3 mb-3">
+            <p className="text-xs font-black text-indigo-700 uppercase">
+              Hoặc chọn từ danh bạ
+            </p>
+            {availableContacts.length > 0 && (
+              <span className="text-[11px] font-bold text-gray-400">
+                {availableContacts.length} người có thể thêm
+              </span>
+            )}
+          </div>
+
+          {availableContacts.length === 0 ? (
+            <p className="text-sm text-gray-500 italic">
+              {contacts.length === 0
+                ? "Danh bạ đang trống. Bạn có thể nhập tên ở ô trên để thêm thẳng vào nhóm."
+                : "Tất cả người trong danh bạ đã có trong nhóm này."}
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {availableContacts.map((contact) => (
+                <button
+                  key={contact.id}
+                  onClick={() => addContactToGroup(contact)}
+                  className="flex items-center gap-2 px-3 py-2 bg-white rounded-xl border border-violet-100 shadow-sm hover:shadow-md hover:border-indigo-400 hover:text-indigo-600 transition-all text-sm font-bold text-gray-700 active:scale-95"
+                >
+                  <Avatar
+                    name={contact.name}
+                    src={contact.photoURL}
+                    size="sm"
+                    className="w-6 h-6 text-[9px]"
+                  />
+                  <span className="max-w-[140px] truncate">{contact.name}</span>
+                  <Plus size={14} className="ml-0.5" />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
   // --- COMPONENT POPUP CHIA SẺ (CHỈ HIỆN MÃ NHÓM) ---
   const renderShareModal = () => {
     if (!sharingGroup) return null;
@@ -5939,7 +6594,7 @@ export default function App() {
   };
 
   return (
-    <div className="fixed inset-0 bg-gray-50 font-sans overflow-hidden flex flex-col overscroll-none">
+      <div className="sm-app-shell fixed inset-0 bg-gray-50 font-sans overflow-hidden flex flex-col overscroll-none">
       <Toast
         message={toast?.message}
         type={toast?.type}
@@ -6041,10 +6696,10 @@ export default function App() {
 
       {/* --- MODAL TẠO NHÓM MỚI (UI SIÊU MƯỢT & HIỆN ĐẠI) --- */}
       {isCreateGroupModalOpen && (
-        <div className="fixed inset-0 z-[600] flex items-end md:items-center justify-center bg-black/40  p-0 md:p-4 animate-fade-in">
-          <div className="bg-white rounded-t-[2rem] md:rounded-[2rem] w-full max-w-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
+        <div className="sm-modal-backdrop fixed inset-0 z-[600] flex items-end md:items-center justify-center bg-black/40  p-0 md:p-4 animate-fade-in">
+          <div className="sm-modal-card bg-white rounded-t-[2rem] md:rounded-[2rem] w-full max-w-lg shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-slide-up">
             {/* Header */}
-            <div className="p-5 md:p-6 border-b border-gray-100 flex justify-between items-center bg-white relative shrink-0">
+            <div className="sm-modal-header p-5 md:p-6 border-b border-gray-100 flex justify-between items-center bg-white relative shrink-0">
               {/* Thanh kéo nhỏ cho Mobile */}
               <div className="w-12 h-1.5 bg-gray-200 rounded-full absolute top-2 left-1/2 -translate-x-1/2 md:hidden"></div>
               <h3 className="font-black text-xl text-gray-800 mt-2 md:mt-0">
@@ -6068,6 +6723,9 @@ export default function App() {
                   type="text"
                   value={newGroupName}
                   onChange={(e) => setNewGroupName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && newGroupName.trim()) handleCreateNewGroup();
+                  }}
                   placeholder="VD: Du lịch Đà Lạt, Tiền nhà..."
                   className="w-full p-4 bg-white rounded-2xl outline-none focus:ring-2 focus:ring-indigo-500/30 border border-gray-200 text-lg font-bold text-gray-800 shadow-sm transition-all placeholder-gray-300"
                   autoFocus
@@ -6215,7 +6873,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="p-5 md:p-6 border-t border-gray-100 bg-white flex gap-3 shrink-0 pb-[calc(1.25rem+env(safe-area-inset-bottom))] md:pb-6">
+            <div className="sm-modal-footer p-5 md:p-6 border-t border-gray-100 bg-white flex gap-3 shrink-0 pb-[calc(1.25rem+env(safe-area-inset-bottom))] md:pb-6">
               <button
                 onClick={() => setIsCreateGroupModalOpen(false)}
                 className="flex-[0.4] py-3.5 md:py-4 bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold rounded-2xl transition-colors active:scale-95"
@@ -6299,8 +6957,8 @@ export default function App() {
 
       {/* --- MODAL NHẬP MÃ THAM GIA NHÓM --- */}
       {isJoinModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in">
-          <div className="bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden scale-100 animate-scale-up">
+        <div className="sm-modal-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in">
+          <div className="sm-modal-card bg-white rounded-3xl w-full max-w-sm shadow-2xl overflow-hidden scale-100 animate-scale-up">
             <div className="p-6">
               <div className="flex justify-between items-center mb-6">
                 <h3 className="text-xl font-bold text-gray-800">
@@ -6323,6 +6981,14 @@ export default function App() {
                   onChange={(e) =>
                     setJoinCodeInput(e.target.value.toUpperCase())
                   }
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && joinCodeInput.trim()) {
+                      handleJoinGroup(joinCodeInput);
+                      setIsJoinModalOpen(false);
+                      setJoinCodeInput("");
+                    }
+                  }}
+                  maxLength={8}
                   className="w-full p-4 bg-gray-50 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 border border-gray-100 font-black text-gray-700 tracking-widest text-center text-xl uppercase"
                   placeholder="VD: ABCXYZ12"
                   autoFocus
@@ -6345,7 +7011,7 @@ export default function App() {
       )}
 
       {/* --- SIDEBAR MỚI (QUẢN LÝ LIST NHÓM) --- */}
-      <aside className="hidden md:flex fixed top-0 bottom-0 left-0 w-72 flex-col bg-white border-r border-gray-100 shadow-xl z-20">
+      <aside className="sm-sidebar hidden md:flex fixed top-0 bottom-0 left-0 w-72 flex-col bg-white border-r border-gray-100 shadow-xl z-20">
         {/* 1. HEADER */}
         <div className="p-6 flex items-center gap-3 border-b border-gray-50 shrink-0">
           {/* Đã thay bằng appIcon, có bo góc và đổ bóng cho đẹp */}
@@ -6583,9 +7249,9 @@ export default function App() {
         {/* --- MOBILE VIEW --- */}
         {/* Chỉ render khi là Mobile */}
         {isMobileView && (
-          <div className="md:hidden flex flex-col h-full bg-gray-50">
+          <div className="sm-mobile-screen md:hidden flex flex-col h-full bg-gray-50">
             {/* 1. HEADER MOBILE (Nền hồng) */}
-            <div className="bg-gradient-to-br from-indigo-600 to-violet-500 px-5 pt-12 pb-16 shrink-0 text-white rounded-b-[3rem] shadow-sm relative z-20 overflow-hidden">
+            <div className="sm-mobile-hero bg-gradient-to-br from-indigo-600 to-violet-500 px-5 pt-12 pb-16 shrink-0 text-white rounded-b-[3rem] shadow-sm relative z-20 overflow-hidden">
               {/* Bóng mờ */}
               <div className="absolute top-[-40px] right-[-20px] w-48 h-48 bg-white/15 rounded-full blur-3xl pointer-events-none"></div>
               <div className="absolute bottom-[-20px] left-[-20px] w-32 h-32 bg-white/10 rounded-full blur-2xl pointer-events-none"></div>
@@ -6659,7 +7325,7 @@ export default function App() {
             {/* 1.5 FLOATING CARD (Đã rút ra ngoài để không bao giờ bị cắt viền) */}
             {activeTab === "dashboard" && (
               <div className="px-5 relative z-30 -mt-10 mb-4 animate-slide-up">
-                <div className="bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.08)] p-5 flex justify-between items-center">
+                <div className="sm-wallet-card bg-white rounded-3xl shadow-[0_8px_30px_rgb(0,0,0,0.08)] p-5 flex justify-between items-center">
                   <div className="flex-1 flex flex-col items-center border-r border-gray-100">
                     <div className="w-8 h-8 rounded-full bg-teal-50 flex items-center justify-center mb-1">
                       <TrendingUp size={16} className="text-teal-600" />
@@ -6688,7 +7354,7 @@ export default function App() {
 
             {/* 2. BODY CONTENT */}
             {/* SỬA 1: Xóa pb-[350px] và các class thừa ở thẻ cha ngoài cùng */}
-            <div className="flex-1 flex flex-col min-h-0 z-30 px-4 pt-2 relative overflow-hidden">
+            <div className="sm-mobile-body flex-1 flex flex-col min-h-0 z-30 px-4 pt-2 relative overflow-hidden">
               <AnimatePresence mode="wait">
                 <motion.div
                   key={
@@ -6860,6 +7526,10 @@ export default function App() {
                                   onChange={(e) =>
                                     setNewLocalContactName(e.target.value)
                                   }
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter")
+                                      handleAddLocalContact();
+                                  }}
                                   placeholder="Nhập tên (VD: Gdragon)..."
                                   className="flex-1 min-w-0 p-2.5 md:p-3 rounded-lg md:rounded-xl border border-violet-100 text-sm outline-none focus:ring-2 ring-gray-200"
                                 />
@@ -7294,53 +7964,8 @@ export default function App() {
 
                       {/* 2. KHU VỰC NỘI DUNG SCROLL */}
                       <div className="flex-1 overflow-y-auto p-6 custom-scrollbar bg-white">
-                        {/* Khu vực thêm từ danh bạ (UI Mới Nét đứt) */}
-                        <div className="flex flex-col p-5 bg-indigo-50/30 border-2 border-indigo-100 border-dashed rounded-[1.5rem] mb-8">
-                          {/* Tiêu đề và Icon (Nằm bên trái bình thường) */}
-                          <div className="flex items-center justify-center text gap-2 mb-4">
-                            <div className="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center">
-                              <Plus size={16} strokeWidth={3} />
-                            </div>
-                            <span className="font-bold text-indigo-700 text-sm">
-                              Thêm từ danh bạ
-                            </span>
-                          </div>
-
-                          {/* Nội dung bên trong (Được căn giữa) */}
-                          {contacts.length === 0 ? (
-                            <p className="text-center text-gray-400 italic text-sm">
-                              Danh bạ trống. Ra trang chủ để thêm.
-                            </p>
-                          ) : (
-                            <div className="flex flex-wrap justify-center gap-2">
-                              {contacts.filter(
-                                (c) => !people.some((p) => p.id === c.id),
-                              ).length === 0 && (
-                                <p className="text-center text-indigo-400 text-xs font-medium w-full">
-                                  Đã thêm hết bạn bè vào nhóm.
-                                </p>
-                              )}
-
-                              {contacts
-                                .filter(
-                                  (c) => !people.some((p) => p.id === c.id),
-                                )
-                                .map((c) => (
-                                  <button
-                                    key={c.id}
-                                    onClick={() => addContactToGroup(c)}
-                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-xl border border-indigo-200 font-bold text-gray-700 text-sm shadow-sm active:scale-95 hover:bg-indigo-50 transition-colors"
-                                  >
-                                    <Avatar
-                                      name={c.name}
-                                      size="sm"
-                                      className="w-5 h-5 text-[8px]"
-                                    />
-                                    {c.name}
-                                  </button>
-                                ))}
-                            </div>
-                          )}
+                        <div className="mb-8">
+                          {renderGroupMemberAddPanel({ compact: true })}
                         </div>
 
                         {/* List thành viên hiện tại */}
@@ -7390,16 +8015,16 @@ export default function App() {
                         </div>
 
                         {/* 3. KHU VỰC MÃ NHÓM Ở ĐÁY */}
-                        <div className="mt-10 mb-6 p-6 bg-gradient-to-br from-slate-50 to-gray-100 rounded-[2rem] border border-gray-200 text-center relative overflow-hidden">
-                          <span className="text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2 block">
+                        <div className="sm-group-code-card mt-10 mb-6 p-6 bg-gradient-to-br from-slate-50 to-gray-100 rounded-[2rem] border border-gray-200 text-center relative overflow-hidden">
+                          <span className="sm-group-code-label text-[11px] font-black text-gray-400 uppercase tracking-widest mb-2 block">
                             Mã tham gia nhóm
                           </span>
-                          <div className="font-black text-3xl md:text-4xl text-gray-800 tracking-[0.2em] select-all py-1">
+                          <div className="sm-group-code-value font-black text-3xl md:text-4xl text-gray-800 tracking-[0.2em] select-all py-1">
                             {groupId}
                           </div>
                           <button
                             onClick={handleShareGroup}
-                            className="mt-4 mx-auto bg-white border border-gray-200 shadow-sm text-indigo-600 font-bold px-5 py-2.5 rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-50 active:scale-95 transition-all w-full md:w-auto"
+                            className="sm-group-code-action mt-4 mx-auto bg-white border border-gray-200 shadow-sm text-indigo-600 font-bold px-5 py-2.5 rounded-xl flex items-center justify-center gap-2 hover:bg-indigo-50 active:scale-95 transition-all w-full md:w-auto"
                           >
                             <Share2 size={18} strokeWidth={2.5} /> Chia sẻ mã
                             này
@@ -7553,6 +8178,151 @@ export default function App() {
                           })}
                         </div>
                       </div>
+
+                      {groupLedger.rows.length > 0 && (
+                        <div className="sm-ledger-card bg-white p-4 rounded-[1.5rem] shadow-sm shrink-0">
+                          <div className="flex items-start justify-between gap-3 mb-4">
+                            <div className="min-w-0">
+                              <h3 className="font-bold text-gray-800 text-sm uppercase">
+                                Bảng thu/nợ nhóm
+                              </h3>
+                              <p className="text-[11px] text-gray-400 mt-0.5">
+                                Tính theo tiền đã ứng, phần phải góp và khoản
+                                chưa thanh toán.
+                              </p>
+                            </div>
+                            <button
+                              onClick={copyGroupLedger}
+                              className="shrink-0 flex items-center gap-1.5 px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-[11px] font-bold text-gray-600 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition-all active:scale-95"
+                            >
+                              <Copy size={14} /> Copy
+                            </button>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2 mb-4">
+                            <div className="sm-ledger-metric">
+                              <span>Đã ứng</span>
+                              <strong>
+                                {formatCompactCurrency(groupLedger.totalPaid)}
+                              </strong>
+                            </div>
+                            <div className="sm-ledger-metric">
+                              <span>Phải góp</span>
+                              <strong>
+                                {formatCompactCurrency(groupLedger.totalShare)}
+                              </strong>
+                            </div>
+                            <div className="sm-ledger-metric">
+                              <span>Còn lệch</span>
+                              <strong>
+                                {formatCompactCurrency(
+                                  groupLedger.rows.reduce(
+                                    (sum, row) => sum + Math.abs(row.net),
+                                    0,
+                                  ) / 2,
+                                )}
+                              </strong>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2">
+                            {groupLedger.rows.map((row) => {
+                              const isMe = row.id === user?.uid;
+                              const statusText =
+                                row.net > 0
+                                  ? "Cần thu"
+                                  : row.net < 0
+                                  ? "Cần trả"
+                                  : "Đã cân";
+                              const statusClass =
+                                row.net > 0
+                                  ? "sm-ledger-status-positive"
+                                  : row.net < 0
+                                  ? "sm-ledger-status-negative"
+                                  : "sm-ledger-status-neutral";
+
+                              return (
+                                <div key={row.id} className="sm-ledger-row">
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    {row.photoURL ? (
+                                      <img
+                                        src={row.photoURL}
+                                        alt={row.name}
+                                        className="w-9 h-9 rounded-full object-cover border border-gray-100 shrink-0"
+                                      />
+                                    ) : (
+                                      <Avatar
+                                        name={row.name}
+                                        src={row.photoURL}
+                                        size="sm"
+                                        className="shrink-0"
+                                      />
+                                    )}
+                                    <div className="min-w-0">
+                                      <p className="font-bold text-gray-800 text-sm truncate">
+                                        {isMe ? "Bạn" : row.name}
+                                      </p>
+                                      <p className="text-[11px] text-gray-400 truncate">
+                                        Ứng {formatCompactCurrency(row.paid)} ·
+                                        góp {formatCompactCurrency(row.share)}
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  <div className="text-right shrink-0">
+                                    <span
+                                      className={`sm-ledger-status ${statusClass}`}
+                                    >
+                                      {statusText}
+                                    </span>
+                                    <p className="font-black text-sm text-gray-800 mt-1">
+                                      {formatCompactCurrency(Math.abs(row.net))}
+                                    </p>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          {groupLedger.settlementSuggestions.length > 0 && (
+                            <div className="sm-ledger-transfer mt-4">
+                              <div className="flex items-center gap-2 mb-2">
+                                <ArrowRightLeft size={15} />
+                                <h4 className="font-black text-xs uppercase">
+                                  Gợi ý chuyển khoản
+                                </h4>
+                              </div>
+                              <div className="space-y-2">
+                                {groupLedger.settlementSuggestions.map(
+                                  (item, index) => (
+                                    <div
+                                      key={`${item.fromId}-${item.toId}-${index}`}
+                                      className="flex items-center justify-between gap-3 text-sm"
+                                    >
+                                      <span className="min-w-0 truncate">
+                                        <b>
+                                          {item.fromId === user?.uid
+                                            ? "Bạn"
+                                            : item.fromName}
+                                        </b>{" "}
+                                        chuyển cho{" "}
+                                        <b>
+                                          {item.toId === user?.uid
+                                            ? "Bạn"
+                                            : item.toName}
+                                        </b>
+                                      </span>
+                                      <strong className="shrink-0 text-indigo-600">
+                                        {formatCompactCurrency(item.amount)}
+                                      </strong>
+                                    </div>
+                                  ),
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* LỊCH SỬ GIAO DỊCH (SCROLL TỰ NHIÊN) */}
                       <div className="bg-white p-4 rounded-[1.5rem] shadow-sm shrink-0 flex flex-col mb-4">
@@ -7840,7 +8610,7 @@ export default function App() {
 
             {/* 3. BOTTOM NAVIGATION (Phong cách Super App MoMo - ĐÃ CÂN BẰNG TUYỆT ĐỐI) */}
             {!selectedPersonId && (
-              <div className="fixed bottom-0 left-0 right-0 z-50 bg-white/95 shadow-lg border-t border-gray-100 pb-[env(safe-area-inset-bottom)] shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
+              <div className="sm-bottom-nav fixed bottom-0 left-0 right-0 z-50 bg-white/95 shadow-lg border-t border-gray-100 pb-[env(safe-area-inset-bottom)] shadow-[0_-10px_40px_rgba(0,0,0,0.05)]">
                 {/* Dùng grid 3 cột để đảm bảo các nút tự động chia đều không gian */}
                 <div className="grid grid-cols-3 items-center h-16 relative max-w-md mx-auto">
                   {/* NÚT HOME (BÊN TRÁI) */}
@@ -7878,7 +8648,7 @@ export default function App() {
                           ? openAddModal
                           : () => setIsCreateGroupModalOpen(true)
                       }
-                      className="absolute -top-7 w-16 h-16 bg-gradient-to-tr from-indigo-600 to-violet-500 rounded-full text-white flex items-center justify-center active:scale-90 transition-transform border-4 border-white shadow-xl z-50"
+                      className="sm-fab absolute -top-7 w-16 h-16 bg-gradient-to-tr from-indigo-600 to-violet-500 rounded-full text-white flex items-center justify-center active:scale-90 transition-transform border-4 border-white shadow-xl z-50"
                     >
                       <Plus size={32} strokeWidth={2.5} />
                     </button>
@@ -7933,6 +8703,9 @@ export default function App() {
                       <input
                         value={newLocalContactName}
                         onChange={(e) => setNewLocalContactName(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleAddLocalContact();
+                        }}
                         placeholder="Tạo bạn ảo (Không cần Email)..."
                         className="flex-1 p-3 rounded-xl bg-gray-50 border border-gray-200 text-base md:text-sm outline-none focus:border-indigo-500"
                       />
@@ -8736,53 +9509,7 @@ export default function App() {
                     // >>> 2.2: QUẢN LÝ THÀNH VIÊN NHÓM (CHỌN TỪ DANH BẠ) <<<
                     <div className="h-full overflow-y-auto custom-scrollbar">
                       <div className="max-w-4xl mx-auto space-y-8 bg-white p-8 rounded-[2rem] shadow-sm border border-gray-200">
-                        {/* KHU VỰC CHỌN TỪ DANH BẠ */}
-                        <div className="bg-violet-50/50 p-6 rounded-2xl border border-blue-100">
-                          <h3 className="font-bold text-indigo-700 mb-4 flex items-center gap-2">
-                            <Plus size={20} /> Thêm thành viên từ Danh bạ
-                          </h3>
-
-                          {contacts.length === 0 ? (
-                            <p className="text-base md:text-sm text-gray-500 italic">
-                              Danh bạ trống. Hãy ra ngoài "Danh bạ bạn bè" để
-                              thêm trước.
-                            </p>
-                          ) : (
-                            <div className="flex flex-wrap gap-2">
-                              {/* Thông báo nếu đã thêm hết */}
-                              {contacts.filter(
-                                (c) => !people.some((p) => p.id === c.id),
-                              ).length === 0 && (
-                                <p className="text-base md:text-sm text-gray-500 italic">
-                                  Tất cả bạn bè đã có trong nhóm này.
-                                </p>
-                              )}
-
-                              {/* Nút bấm thêm nhanh */}
-                              {contacts
-                                .filter(
-                                  (c) => !people.some((p) => p.id === c.id),
-                                ) // Chỉ hiện người CHƯA ở trong nhóm
-                                .map((contact) => (
-                                  <button
-                                    key={contact.id}
-                                    onClick={() => addContactToGroup(contact)}
-                                    className="flex items-center gap-2 px-4 py-2 bg-white rounded-xl border border-violet-100 shadow-sm hover:shadow-md hover:border-blue-500 hover:text-indigo-600 transition-all text-base md:text-sm font-bold text-gray-700"
-                                  >
-                                    <Avatar name={contact.name} size="sm" />
-                                    {contact.name}
-                                    <Plus size={14} className="ml-1" />
-                                  </button>
-                                ))}
-                            </div>
-                          )}
-                          <div className="mt-4 pt-4 border-t border-blue-100">
-                            <p className=" text-blue-400 italic">
-                              * Muốn thêm người mới hoàn toàn? Hãy quay lại tab
-                              "Danh bạ bạn bè" ở ngoài trang chủ.
-                            </p>
-                          </div>
-                        </div>
+                        {renderGroupMemberAddPanel()}
 
                         <h3 className="font-bold text-xl text-gray-800 flex items-center gap-2">
                           Thành viên hiện tại{" "}

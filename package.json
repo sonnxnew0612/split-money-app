@@ -19,6 +19,7 @@
     "@capacitor/core": "^6.0.0",
     "@capacitor/ios": "^6.0.0",
     "@capacitor/push-notifications": "^6.0.5",
+    "browser-image-compression": "^2.0.2",
     "date-fns": "^4.1.0",
     "firebase": "^10.14.1",
     "framer-motion": "^12.29.0",
