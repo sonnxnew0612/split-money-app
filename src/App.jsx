@@ -112,6 +112,49 @@ const formatCompactCurrency = (number) => {
   return formatCurrency(number);
 };
 
+const parseMoneyValue = (value) => {
+  const parsed = parseFloat(String(value ?? "").replace(/\./g, ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+};
+
+const normalizePersonId = (id, uid) => (id === "me" ? uid || "me" : id);
+
+const getExpensePayerEntries = (expense = {}, uid) => {
+  const totalAmount = parseMoneyValue(expense.amount);
+  const rawPayers =
+    Array.isArray(expense.payers) && expense.payers.length > 0
+      ? expense.payers
+      : [{ id: expense.payerId || "me", amount: totalAmount }];
+
+  const entries = rawPayers
+    .map((payer, index) => ({
+      id: normalizePersonId(payer.id || payer.payerId || expense.payerId, uid),
+      amount:
+        rawPayers.length === 1 && !parseMoneyValue(payer.amount)
+          ? totalAmount
+          : parseMoneyValue(payer.amount),
+      index,
+    }))
+    .filter((payer) => payer.id && payer.amount > 0);
+
+  if (entries.length === 0 && expense.payerId) {
+    return [
+      {
+        id: normalizePersonId(expense.payerId, uid),
+        amount: totalAmount,
+        index: 0,
+      },
+    ].filter((payer) => payer.id && payer.amount > 0);
+  }
+
+  return entries;
+};
+
+const isExpensePaidBy = (expense = {}, personId, uid) =>
+  getExpensePayerEntries(expense, uid).some(
+    (payer) => payer.id === normalizePersonId(personId, uid),
+  );
+
 const GROUP_ICONS = [
   "🏠",
   "🚗",
@@ -626,6 +669,7 @@ const ExpenseModal = ({
     date: format(new Date(), "yyyy-MM-dd"),
     sharedWith: [],
     payerId: "me",
+    payers: [{ id: "me", amount: "" }],
     type: "split",
     customShares: {},
     shippingFee: "",
@@ -679,6 +723,18 @@ const ExpenseModal = ({
 
         let loadedPayerId = editingExpense.payerId || "me";
         if (loadedPayerId === uid) loadedPayerId = "me";
+        const loadedPayers =
+          Array.isArray(editingExpense.payers) && editingExpense.payers.length > 0
+            ? editingExpense.payers.map((payer) => ({
+                id: payer.id === uid ? "me" : payer.id || loadedPayerId,
+                amount: payer.amount ? String(payer.amount) : "",
+              }))
+            : [
+                {
+                  id: loadedPayerId,
+                  amount: editingExpense.amount ? String(editingExpense.amount) : "",
+                },
+              ];
 
         let loadedSharedWith = editingExpense.sharedWith || [];
         loadedSharedWith = loadedSharedWith.map((id) =>
@@ -702,6 +758,7 @@ const ExpenseModal = ({
             : format(new Date(), "yyyy-MM-dd"),
           sharedWith: loadedSharedWith,
           payerId: loadedPayerId,
+          payers: loadedPayers,
           type: editingExpense.type || "split",
           customShares: loadedCustomShares,
           shippingFee: editingExpense.shippingFee || "",
@@ -717,6 +774,7 @@ const ExpenseModal = ({
           date: format(new Date(), "yyyy-MM-dd"),
           sharedWith: ["me"], // Mặc định có mình
           payerId: "me",
+          payers: [{ id: "me", amount: "" }],
           type: "split",
           customShares: {},
           shippingFee: "",
@@ -731,27 +789,27 @@ const ExpenseModal = ({
     }
   }, [editingExpense, isOpen, user?.uid]);
 
-  // --- EFFECT 2: LOGIC TỰ ĐỘNG CHO SPLIT (ĐÃ CẬP NHẬT CHỐNG TRÙNG LẶP LỖI) ---
   useEffect(() => {
-    if (form.type === "split" && form.payerId) {
-      const uid = user?.uid;
-      // Quy đổi id người trả về chuẩn để so sánh
-      const actualPayerId = form.payerId === "me" ? uid : form.payerId;
+    if (form.type !== "split") return;
 
-      // Kiểm tra an toàn: Người trả tiền ĐÃ CÓ trong danh sách chia chưa?
-      // (Bất kể đang lưu dưới dạng chữ "me" hay UID thật)
-      const hasPayer = form.sharedWith.some(
+    const uid = user?.uid;
+    const payerIds = (form.payers?.length ? form.payers : [{ id: form.payerId }])
+      .map((payer) => payer.id)
+      .filter(Boolean);
+    const missingPayers = payerIds.filter((payerId) => {
+      const actualPayerId = payerId === "me" ? uid : payerId;
+      return !form.sharedWith.some(
         (id) => (id === "me" ? uid : id) === actualPayerId,
       );
+    });
 
-      if (!hasPayer) {
-        setForm((prev) => ({
-          ...prev,
-          sharedWith: [...prev.sharedWith, prev.payerId],
-        }));
-      }
+    if (missingPayers.length > 0) {
+      setForm((prev) => ({
+        ...prev,
+        sharedWith: [...prev.sharedWith, ...missingPayers],
+      }));
     }
-  }, [form.payerId, form.type, form.sharedWith, user?.uid]);
+  }, [form.payerId, form.payers, form.type, form.sharedWith, user?.uid]);
 
   if (!isOpen) return null;
 
@@ -842,12 +900,6 @@ const ExpenseModal = ({
     });
   };
 
-  const getPayerName = () => {
-    if (form.payerId === "me") return "Tôi";
-    const p = people.find((i) => i.id === form.payerId);
-    return p ? p.name : "Chưa chọn";
-  };
-
   const getSharedWithNames = () => {
     if (form.sharedWith.length === 0) return "Chưa chọn ai";
     const names = form.sharedWith.map((id) =>
@@ -856,6 +908,100 @@ const ExpenseModal = ({
         : people.find((p) => p.id === id)?.name || "",
     );
     return names.join(", ");
+  };
+
+  const getPayerPerson = (id) =>
+    id === "me" || id === user?.uid
+      ? {
+          id: "me",
+          name: "Tôi",
+          photoURL: user?.photoURL,
+        }
+      : people.find((p) => p.id === id) || { id, name: "Thành viên" };
+
+  const getNormalizedFormPayers = () => {
+    const source = form.payers?.length
+      ? form.payers
+      : [{ id: form.payerId || "me", amount: form.amount || "" }];
+    const seen = new Set();
+    return source
+      .filter((payer) => payer?.id)
+      .filter((payer) => {
+        if (seen.has(payer.id)) return false;
+        seen.add(payer.id);
+        return true;
+      });
+  };
+
+  const getPayerTotal = () => {
+    const selectedPayers = getNormalizedFormPayers();
+    const enteredTotal = selectedPayers.reduce(
+      (sum, payer) => sum + parseMoneyValue(payer.amount),
+      0,
+    );
+
+    if (selectedPayers.length === 1 && enteredTotal === 0) {
+      return getBillTotal();
+    }
+
+    return enteredTotal;
+  };
+  const getBillTotal = () =>
+    form.type === "custom"
+      ? calculateTotalPreview()
+      : parseMoneyValue(form.amount);
+  const getPayerDiff = () => getPayerTotal() - getBillTotal();
+
+  const getPayerSummary = () => {
+    const selectedPayers = getNormalizedFormPayers();
+    if (selectedPayers.length === 0) return "Chưa chọn ai";
+    if (selectedPayers.length === 1) {
+      const person = getPayerPerson(selectedPayers[0].id);
+      return person.name || "Thành viên";
+    }
+    return `${selectedPayers.length} người cùng ứng`;
+  };
+
+  const togglePayerContributor = (id) => {
+    setForm((prev) => {
+      const currentPayers = prev.payers?.length
+        ? prev.payers
+        : [{ id: prev.payerId || "me", amount: prev.amount || "" }];
+      const exists = currentPayers.some((payer) => payer.id === id);
+      const nextPayers = exists
+        ? currentPayers.filter((payer) => payer.id !== id)
+        : [...currentPayers, { id, amount: "" }];
+      const safePayers =
+        nextPayers.length > 0 ? nextPayers : [{ id: "me", amount: "" }];
+
+      return {
+        ...prev,
+        payerId: safePayers[0].id,
+        payers: safePayers,
+      };
+    });
+  };
+
+  const updatePayerContribution = (id, value) => {
+    const cleanValue = value.replace(/\./g, "");
+    if (!/^\d*$/.test(cleanValue)) return;
+
+    setForm((prev) => {
+      const currentPayers = prev.payers?.length
+        ? prev.payers
+        : [{ id: prev.payerId || "me", amount: prev.amount || "" }];
+      const nextPayers = currentPayers.some((payer) => payer.id === id)
+        ? currentPayers.map((payer) =>
+            payer.id === id ? { ...payer, amount: cleanValue } : payer,
+          )
+        : [...currentPayers, { id, amount: cleanValue }];
+
+      return {
+        ...prev,
+        payerId: nextPayers[0]?.id || "me",
+        payers: nextPayers,
+      };
+    });
   };
 
   // --- HANDLERS: UPLOAD ẢNH & COMMENT ---
@@ -1004,7 +1150,41 @@ const ExpenseModal = ({
         }
       }
     }
-    onSave(form);
+    const finalAmount = parseMoneyValue(form.amount);
+    const payerSource =
+      form.type === "full"
+        ? [{ id: form.payerId || "me", amount: finalAmount }]
+        : getNormalizedFormPayers();
+    let payerRows = payerSource
+      .map((payer) => ({
+        id: payer.id,
+        amount: parseMoneyValue(payer.amount),
+      }))
+      .filter((payer) => payer.id);
+
+    if (payerRows.length === 1 && payerRows[0].amount === 0) {
+      payerRows = [{ ...payerRows[0], amount: finalAmount }];
+    }
+
+    const payerSum = payerRows.reduce((sum, payer) => sum + payer.amount, 0);
+    if (payerRows.length === 0 || payerSum <= 0) {
+      showToast("Vui lòng chọn người ứng tiền!", "error");
+      return;
+    }
+
+    if (Math.abs(payerSum - finalAmount) > 1) {
+      showToast(
+        `Tổng tiền ứng (${formatCurrency(payerSum)}) phải bằng tổng bill (${formatCurrency(finalAmount)}).`,
+        "error",
+      );
+      return;
+    }
+
+    onSave({
+      ...form,
+      payerId: payerRows[0].id,
+      payers: payerRows,
+    });
   };
 
   // Tính toán TỔNG BILL THỰC TẾ hiển thị bên ngoài
@@ -1163,7 +1343,32 @@ const ExpenseModal = ({
                     {["split", "custom", "full"].map((tabMode) => (
                       <button
                         key={tabMode}
-                        onClick={() => setForm({ ...form, type: tabMode })}
+                        onClick={() =>
+                          setForm((prev) => {
+                            if (tabMode === "full") {
+                              return {
+                                ...prev,
+                                type: tabMode,
+                                loanType: "lend",
+                                payerId: "me",
+                                payers: [{ id: "me", amount: prev.amount || "" }],
+                                sharedWith: [],
+                              };
+                            }
+
+                            if (prev.type === "full") {
+                              return {
+                                ...prev,
+                                type: tabMode,
+                                payerId: "me",
+                                payers: [{ id: "me", amount: prev.amount || "" }],
+                                sharedWith: ["me"],
+                              };
+                            }
+
+                            return { ...prev, type: tabMode };
+                          })
+                        }
                         className={`flex-1 py-3 rounded-xl font-bold text-base md:text-sm z-10 transition-colors duration-300 ${
                           form.type === tabMode
                             ? "text-indigo-600"
@@ -1329,11 +1534,16 @@ const ExpenseModal = ({
                         </div>
                         <div>
                           <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wide">
-                            Người trả tiền
+                            Người ứng tiền
                           </p>
                           <p className="font-bold text-gray-800 text-base">
-                            {getPayerName()}
+                            {getPayerSummary()}
                           </p>
+                          {getNormalizedFormPayers().length > 1 && (
+                            <p className="text-[11px] text-indigo-500 font-bold">
+                              Tổng ứng: {formatCompactCurrency(getPayerTotal())}
+                            </p>
+                          )}
                         </div>
                       </div>
                       <ChevronRight
@@ -1488,6 +1698,7 @@ const ExpenseModal = ({
                                 ...form,
                                 loanType: "lend",
                                 payerId: "me",
+                                payers: [{ id: "me", amount: form.amount || "" }],
                                 sharedWith: [],
                               })
                             }
@@ -1505,6 +1716,7 @@ const ExpenseModal = ({
                                 ...form,
                                 loanType: "borrow",
                                 payerId: "",
+                                payers: [{ id: "", amount: form.amount || "" }],
                                 sharedWith: ["me"],
                               })
                             }
@@ -1924,35 +2136,83 @@ const ExpenseModal = ({
                 <ChevronLeft size={24} />
               </button>
               <h2 className="font-black text-lg text-gray-800 w-full text-center mt-2 md:mt-0">
-                Chọn người trả tiền
+                Ai đã ứng tiền?
               </h2>
             </div>
             {/* Đã thêm overscroll-none */}
             <div className="flex-1 overflow-y-auto overflow-x-hidden overscroll-none touch-pan-y p-4 pt-6 custom-scrollbar space-y-3 pb-[160px]">
+              <div className="bg-white border border-indigo-100 rounded-2xl p-4 shadow-sm">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] font-black text-gray-400 uppercase">
+                      Tổng đã ứng
+                    </p>
+                    <p className="text-xl font-black text-indigo-600">
+                      {formatCompactCurrency(getPayerTotal())}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-[11px] font-black text-gray-400 uppercase">
+                      Tổng bill
+                    </p>
+                    <p className="text-xl font-black text-gray-800">
+                      {formatCompactCurrency(getBillTotal())}
+                    </p>
+                  </div>
+                </div>
+                {getBillTotal() > 0 && Math.abs(getPayerDiff()) > 1 && (
+                  <p className="mt-2 text-xs font-bold text-rose-500">
+                    {getPayerDiff() > 0 ? "Đang dư" : "Còn thiếu"}{" "}
+                    {formatCurrency(Math.abs(getPayerDiff()))}
+                  </p>
+                )}
+              </div>
+
               <div
                 onClick={() => {
-                  setForm({ ...form, payerId: "me" });
-                  setCurrentView("form");
+                  togglePayerContributor("me");
                 }}
                 className={`flex items-center justify-between p-4 rounded-2xl cursor-pointer active:scale-95 transition-all border ${
-                  form.payerId === "me"
+                  getNormalizedFormPayers().some((payer) => payer.id === "me")
                     ? "bg-indigo-50 border-indigo-200 shadow-sm"
                     : "bg-white border-gray-100 hover:shadow-md"
                 }`}
               >
-                <div className="flex items-center gap-4">
+                <div className="flex items-center gap-3 min-w-0 flex-1 pr-3">
                   {renderMyAvatar("md")}
                   <span
-                    className={`font-bold text-lg ${
-                      form.payerId === "me"
+                    className={`font-bold text-lg truncate ${
+                      getNormalizedFormPayers().some((payer) => payer.id === "me")
                         ? "text-indigo-600"
                         : "text-gray-800"
                     }`}
                   >
-                    Tôi (Mặc định)
+                    Tôi
                   </span>
                 </div>
-                {form.payerId === "me" ? (
+                {getNormalizedFormPayers().some((payer) => payer.id === "me") && (
+                  <div
+                    className="w-36 flex items-center bg-white rounded-xl border border-indigo-100 pr-3 shadow-sm"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={
+                        getNormalizedFormPayers()
+                          .find((payer) => payer.id === "me")
+                          ?.amount?.replace(/\B(?=(\d{3})+(?!\d))/g, ".") || ""
+                      }
+                      onChange={(e) =>
+                        updatePayerContribution("me", e.target.value)
+                      }
+                      placeholder="0"
+                      className="w-full bg-transparent outline-none text-right p-2 font-black text-indigo-600"
+                    />
+                    <span className="text-gray-400 font-bold">đ</span>
+                  </div>
+                )}
+                {getNormalizedFormPayers().some((payer) => payer.id === "me") ? (
                   <CheckCircle2 className="text-indigo-500" size={28} />
                 ) : (
                   <Circle className="text-gray-300" size={28} />
@@ -1961,13 +2221,14 @@ const ExpenseModal = ({
               {people
                 .filter((p) => p.id !== user?.uid)
                 .map((p) => {
-                  const isSelected = form.payerId === p.id;
+                  const isSelected = getNormalizedFormPayers().some(
+                    (payer) => payer.id === p.id,
+                  );
                   return (
                     <div
                       key={p.id}
                       onClick={() => {
-                        setForm({ ...form, payerId: p.id });
-                        setCurrentView("form");
+                        togglePayerContributor(p.id);
                       }}
                       className={`flex items-center justify-between p-4 rounded-2xl cursor-pointer active:scale-95 transition-all border ${
                         isSelected
@@ -1975,7 +2236,7 @@ const ExpenseModal = ({
                           : "bg-white border-gray-100 hover:shadow-md"
                       }`}
                     >
-                      <div className="flex items-center gap-4">
+                      <div className="flex items-center gap-3 min-w-0 flex-1 pr-3">
                         {p.photoURL ? (
                           <img
                             src={p.photoURL}
@@ -1986,13 +2247,36 @@ const ExpenseModal = ({
                           <Avatar name={p.name} src={p.photoURL} size="md" />
                         )}
                         <span
-                          className={`font-bold text-lg ${
+                          className={`font-bold text-lg truncate ${
                             isSelected ? "text-indigo-600" : "text-gray-800"
                           }`}
                         >
                           {p.name}
                         </span>
                       </div>
+                      {isSelected && (
+                        <div
+                          className="w-36 flex items-center bg-white rounded-xl border border-indigo-100 pr-3 shadow-sm"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            value={
+                              getNormalizedFormPayers()
+                                .find((payer) => payer.id === p.id)
+                                ?.amount?.replace(/\B(?=(\d{3})+(?!\d))/g, ".") ||
+                              ""
+                            }
+                            onChange={(e) =>
+                              updatePayerContribution(p.id, e.target.value)
+                            }
+                            placeholder="0"
+                            className="w-full bg-transparent outline-none text-right p-2 font-black text-indigo-600"
+                          />
+                          <span className="text-gray-400 font-bold">đ</span>
+                        </div>
+                      )}
                       {isSelected ? (
                         <CheckCircle2 className="text-indigo-500" size={28} />
                       ) : (
@@ -2001,6 +2285,14 @@ const ExpenseModal = ({
                     </div>
                   );
                 })}
+            </div>
+            <div className="absolute bottom-0 left-0 right-0 p-4 border-t border-gray-100/50 bg-white/80  pb-[calc(1rem+env(safe-area-inset-bottom))] z-50">
+              <button
+                onClick={() => setCurrentView("form")}
+                className="w-full py-4 bg-indigo-600 text-white rounded-2xl font-black text-lg shadow-lg shadow-indigo-200 active:scale-95 transition-all"
+              >
+                Xong
+              </button>
             </div>
           </div>
 
@@ -2121,12 +2413,18 @@ const ExpenseModal = ({
                             setForm({
                               ...form,
                               payerId: "me",
+                              payers: [
+                                { id: "me", amount: form.amount || "" },
+                              ],
                               sharedWith: [p.id],
                             });
                           else
                             setForm({
                               ...form,
                               payerId: p.id,
+                              payers: [
+                                { id: p.id, amount: form.amount || "" },
+                              ],
                               sharedWith: ["me"],
                             });
                           setCurrentView("form"); // Chạm xong quay về luôn nếu là 1-1
@@ -2930,32 +3228,64 @@ const HistoryItem = React.memo(
       };
     }, [isSwiped]);
 
+    const currentContextPeople = exp._groupMembers || people;
+    const amount = parseMoneyValue(exp.amount);
+    const payerEntries = getExpensePayerEntries(exp, user?.uid);
+    const payerTotal = payerEntries.reduce((sum, payer) => sum + payer.amount, 0);
+    const toRealId = (id) => (id === "me" ? user?.uid : id);
+    const payerIdSet = new Set(payerEntries.map((payer) => payer.id));
+    const getShareTotal = (targetId) => {
+      if (!targetId) return 0;
+      if (exp.type === "custom") {
+        return (
+          parseMoneyValue(exp.customShares?.[targetId]) ||
+          parseMoneyValue(targetId === user?.uid ? exp.customShares?.me : 0)
+        );
+      }
+
+      const sharedSlots = (exp.sharedWith || [])
+        .map((id) => toRealId(id))
+        .filter(Boolean);
+      const billableSlots =
+        exp.type === "full"
+          ? sharedSlots.filter((id) => !payerIdSet.has(id))
+          : sharedSlots;
+      if (billableSlots.length === 0) return 0;
+
+      const sharePerSlot = amount / billableSlots.length;
+      return billableSlots.filter((id) => id === targetId).length * sharePerSlot;
+    };
+
     // --- TÍNH TOÁN TIỀN NỢ CỦA RIÊNG NGƯỜI ĐƯỢC CHỌN ---
     let specificDebt = 0;
-    if (selectedPersonId) {
-      if (exp.type === "split") {
-        const slots = (exp.sharedWith || []).filter(
-          (id) => id === selectedPersonId,
-        ).length;
-        if (slots > 0)
-          specificDebt = (exp.amount / exp.sharedWith.length) * slots;
-      } else if (exp.type === "custom") {
-        const val = exp.customShares?.[selectedPersonId];
-        const arr = Array.isArray(val) ? val : val ? [val] : [];
-        specificDebt = arr.reduce((sum, curr) => sum + parseInt(curr || 0), 0);
-      } else if (exp.type === "full") {
-        if ((exp.sharedWith || []).includes(selectedPersonId))
-          specificDebt = exp.amount;
-      }
+    let specificDebtDirection = "owed_to_me";
+    if (selectedPersonId && payerTotal > 0) {
+      const myPaid =
+        payerEntries.find((payer) => payer.id === user?.uid)?.amount || 0;
+      const selectedPaid =
+        payerEntries.find((payer) => payer.id === selectedPersonId)?.amount || 0;
+      const selectedOwesMe =
+        getShareTotal(selectedPersonId) * (myPaid / payerTotal);
+      const iOweSelected =
+        getShareTotal(user?.uid) * (selectedPaid / payerTotal);
+      const netSpecificDebt = selectedOwesMe - iOweSelected;
+
+      specificDebt = Math.abs(netSpecificDebt);
+      specificDebtDirection =
+        netSpecificDebt >= 0 ? "owed_to_me" : "i_owe";
     }
 
-    const currentContextPeople = exp._groupMembers || people;
-    const actualPayerId = exp.payerId || "me";
-    const payerName =
-      actualPayerId === "me" || actualPayerId === user?.uid
+    const getPayerDisplayName = (payerId) =>
+      payerId === "me" || payerId === user?.uid
         ? "Tôi"
-        : currentContextPeople.find((p) => p.id === actualPayerId)?.name ||
-          "Ai đó";
+        : currentContextPeople.find((p) => p.id === payerId)?.name || "Ai đó";
+    const payerNames = payerEntries.map((payer) =>
+      getPayerDisplayName(payer.id),
+    );
+    const payerName =
+      payerNames.length > 1
+        ? `${payerNames[0]} + ${payerNames.length - 1}`
+        : payerNames[0] || "Ai đó";
 
     const uniqueSharedWith = [...new Set(exp.sharedWith || [])];
 
@@ -3061,13 +3391,15 @@ const HistoryItem = React.memo(
               <div className="absolute right-0 top-0 flex flex-col items-end shrink-0 z-10">
                 {(() => {
                   // Logic kiểm tra vị thế của TÔI trong giao dịch này
-                  const isMePayer =
-                    exp.payerId === user?.uid || exp.payerId === "me";
+                  const isMePayer = isExpensePaidBy(exp, user?.uid, user?.uid);
                   const amIInvolved =
                     (exp.sharedWith || []).includes(user?.uid) ||
                     (exp.sharedWith || []).includes("me");
 
-                  const isOweMe = isMePayer; // Nợ tôi
+                  const isOweMe =
+                    selectedPersonId && specificDebt > 0
+                      ? specificDebtDirection === "owed_to_me"
+                      : isMePayer; // Nợ tôi
                   const iOwe = !isMePayer && amIInvolved; // Tôi nợ
 
                   return (
@@ -3089,12 +3421,14 @@ const HistoryItem = React.memo(
                       {selectedPersonId && specificDebt > 0 && (
                         <span
                           className={`text-[10px] md:text-xs font-bold px-1.5 py-0.5 rounded-md border mt-1 shadow-sm select-none ${
-                            isOweMe
+                            specificDebtDirection === "owed_to_me"
                               ? "text-emerald-600 bg-emerald-50 border-emerald-100"
                               : "text-rose-500 bg-rose-50 border-rose-100"
                           }`}
                         >
-                          {isOweMe ? "Nợ tôi:" : "Tôi nợ:"}{" "}
+                          {specificDebtDirection === "owed_to_me"
+                            ? "Nợ tôi:"
+                            : "Tôi nợ:"}{" "}
                           {new Intl.NumberFormat("vi-VN").format(
                             Math.round(specificDebt),
                           )}
@@ -3179,8 +3513,7 @@ const HistoryItem = React.memo(
                 {uniqueSharedWith.map((id, idx) => {
                   // 1. Xác định vị thế
                   const isMe = id === user?.uid || id === "me";
-                  const isMePayer =
-                    exp.payerId === user?.uid || exp.payerId === "me";
+                  const isMePayer = isExpensePaidBy(exp, user?.uid, user?.uid);
 
                   // [SỬA LỖI LOGIC TẠI ĐÂY]: Nếu TÔI là người thanh toán bill này, tôi không nợ chính mình -> Ẩn luôn nút xác nhận của TÔI
                   if (isMePayer && isMe) return null;
@@ -3404,6 +3737,20 @@ export default function App() {
       if (newExp.payerId === "me") {
         newExp.payerId = groupOwnerId;
         modified = true;
+      }
+
+      if (Array.isArray(newExp.payers)) {
+        const nextPayers = newExp.payers.map((payer) =>
+          payer.id === "me" ? { ...payer, id: groupOwnerId } : payer,
+        );
+        if (
+          nextPayers.some(
+            (payer, index) => payer.id !== newExp.payers[index]?.id,
+          )
+        ) {
+          newExp.payers = nextPayers;
+          modified = true;
+        }
       }
 
       // 2. Chuyển "me" trong danh sách người tham gia
@@ -3687,7 +4034,11 @@ export default function App() {
             const groupExpenses = gData.expenses || [];
             const hasExpenseHistory = groupExpenses.some(
               (e) =>
-                e.payerId === user.uid || (e.sharedWith || []).includes(user.uid),
+                e.payerId === user.uid ||
+                (e.sharedWith || []).includes(user.uid) ||
+                getExpensePayerEntries(e, user.uid).some(
+                  (payer) => payer.id === user.uid,
+                ),
             );
             const newMembers = hasExpenseHistory
               ? (gData.members || []).map((m) =>
@@ -3949,6 +4300,11 @@ export default function App() {
   const replaceExpenseMemberId = (expense, fromId, toId) => {
     const nextExpense = { ...expense };
     if (nextExpense.payerId === fromId) nextExpense.payerId = toId;
+    if (Array.isArray(nextExpense.payers)) {
+      nextExpense.payers = nextExpense.payers.map((payer) =>
+        payer.id === fromId ? { ...payer, id: toId } : payer,
+      );
+    }
     if (Array.isArray(nextExpense.sharedWith)) {
       nextExpense.sharedWith = nextExpense.sharedWith.map((id) =>
         id === fromId ? toId : id,
@@ -4287,50 +4643,78 @@ export default function App() {
             }));
             allExpenses = [...allExpenses, ...enrichedExpenses];
 
-            // 2. TÍNH TOÁN CÔNG NỢ (Logic cũ giữ nguyên)
+            // 2. TÍNH TOÁN CÔNG NỢ THEO NHIỀU NGƯỜI ỨNG
             const groupDebts = {};
+            const toRealId = (id) => (id === "me" ? user.uid : id);
+            const addGroupDebt = (memberId, amount) => {
+              if (!memberId || memberId === user.uid || Math.abs(amount) < 1) {
+                return;
+              }
+              groupDebts[memberId] = (groupDebts[memberId] || 0) + amount;
+            };
+
             gExpenses.forEach((exp) => {
-              const amount = parseFloat(exp.amount);
-              const payerId = exp.payerId === "me" ? user.uid : exp.payerId;
+              const amount = parseMoneyValue(exp.amount);
+              if (!Number.isFinite(amount) || amount <= 0) return;
 
-              const getShare = (uid) => {
-                if (exp.type === "custom")
-                  return parseFloat(exp.customShares?.[uid] || 0);
+              const payerEntries = getExpensePayerEntries(exp, user.uid);
+              const payerTotal = payerEntries.reduce(
+                (sum, payer) => sum + payer.amount,
+                0,
+              );
+              if (payerTotal <= 0) return;
 
-                let count = exp.sharedWith.length; // <--- BẠN ĐANG CÓ DÒNG NÀY
-
-                // --- HÃY DÁN ĐOẠN FIX VÀO NGAY SAU DÒNG TRÊN ---
-                if (exp.type === "full") {
-                  const realPayerId =
-                    exp.payerId === "me" ? user?.uid : exp.payerId;
-                  const validDebtors = exp.sharedWith.filter((id) => {
-                    const realId = id === "me" ? user?.uid : id;
-                    return realId !== realPayerId;
-                  });
-                  count = validDebtors.length;
+              const settledBy = new Set(
+                (exp.settledBy || []).map((id) => toRealId(id)),
+              );
+              const payerIdSet = new Set(payerEntries.map((payer) => payer.id));
+              const getShareTotal = (targetId) => {
+                if (exp.type === "custom") {
+                  return (
+                    parseMoneyValue(exp.customShares?.[targetId]) ||
+                    parseMoneyValue(
+                      targetId === user.uid ? exp.customShares?.me : 0,
+                    )
+                  );
                 }
-                if (count === 0) return 0;
-                // ------------------------------------------------
 
-                return amount / count;
+                const sharedSlots = (exp.sharedWith || [])
+                  .map((id) => toRealId(id))
+                  .filter(Boolean);
+                const billableSlots =
+                  exp.type === "full"
+                    ? sharedSlots.filter((id) => !payerIdSet.has(id))
+                    : sharedSlots;
+
+                if (billableSlots.length === 0) return 0;
+                const sharePerSlot = amount / billableSlots.length;
+                return (
+                  billableSlots.filter((id) => id === targetId).length *
+                  sharePerSlot
+                );
               };
 
-              if (payerId === user.uid) {
-                exp.sharedWith.forEach((debtorId) => {
-                  if (
-                    debtorId !== user.uid &&
-                    !exp.settledBy?.includes(debtorId)
-                  ) {
-                    groupDebts[debtorId] =
-                      (groupDebts[debtorId] || 0) + getShare(debtorId);
-                  }
-                });
-              } else if (exp.sharedWith.includes(user.uid)) {
-                if (!exp.settledBy?.includes(user.uid)) {
-                  groupDebts[payerId] =
-                    (groupDebts[payerId] || 0) - getShare(user.uid);
+              const myPaid =
+                payerEntries.find((payer) => payer.id === user.uid)?.amount || 0;
+              const myShare = getShareTotal(user.uid);
+
+              gMembers.forEach((member) => {
+                const memberId = toRealId(member.id);
+                if (!memberId || memberId === user.uid) return;
+
+                const memberPaid =
+                  payerEntries.find((payer) => payer.id === memberId)?.amount ||
+                  0;
+                const memberShare = getShareTotal(memberId);
+
+                if (myPaid > 0 && !settledBy.has(memberId)) {
+                  addGroupDebt(memberId, memberShare * (myPaid / payerTotal));
                 }
-              }
+
+                if (memberPaid > 0 && !settledBy.has(user.uid)) {
+                  addGroupDebt(memberId, -(myShare * (memberPaid / payerTotal)));
+                }
+              });
             });
 
             Object.keys(groupDebts).forEach((memId) => {
@@ -4360,8 +4744,8 @@ export default function App() {
       // 3. LỌC VÀ SẮP XẾP LỊCH SỬ (CHỈ LẤY GIAO DỊCH CÓ MẶT TÔI)
       const myRelatedExpenses = allExpenses.filter(
         (e) =>
-          e.payerId === user.uid ||
-          (e.sharedWith && e.sharedWith.includes(user.uid)),
+          isExpensePaidBy(e, user.uid, user.uid) ||
+          (e.sharedWith || []).some((id) => id === user.uid || id === "me"),
       );
       myRelatedExpenses.sort((a, b) => new Date(b.date) - new Date(a.date));
       setGlobalHistory(myRelatedExpenses);
@@ -4968,46 +5352,68 @@ export default function App() {
   // --- LOGIC TÍNH TOÁN CÔNG NỢ (ĐÃ CẬP NHẬT SETTLEMENT) ---
   const calculateNetDebt = (personId) => {
     if (!user) return 0;
-    let balance = 0; // Dương = Họ nợ mình, Âm = Mình nợ họ
+    let balance = 0; // Dương = họ nợ mình, âm = mình nợ họ
+    const currentUserId = user.uid;
+    const toRealId = (id) => (id === "me" ? currentUserId : id);
 
     expenses.forEach((exp) => {
-      const amount = parseFloat(exp.amount);
-      const payerId = exp.payerId || "me";
-      const settledBy = exp.settledBy || [];
+      const amount = parseMoneyValue(exp.amount);
+      if (!Number.isFinite(amount) || amount <= 0) return;
 
-      const getShareOf = (uid) => {
+      const payerEntries = getExpensePayerEntries(exp, currentUserId);
+      const payerTotal = payerEntries.reduce(
+        (sum, payer) => sum + payer.amount,
+        0,
+      );
+      if (payerTotal <= 0) return;
+
+      const settledBy = new Set((exp.settledBy || []).map((id) => toRealId(id)));
+      const payerIdSet = new Set(payerEntries.map((payer) => payer.id));
+
+      const getShareSlots = (targetId) => {
         if (exp.type === "custom") {
-          return parseFloat(exp.customShares?.[uid] || 0);
-        } else {
-          let count = exp.sharedWith.length;
-          if (exp.type === "full") {
-            const realPayerId = exp.payerId === "me" ? user?.uid : exp.payerId;
-            const validDebtors = exp.sharedWith.filter((id) => {
-              const realId = id === "me" ? user?.uid : id;
-              return realId !== realPayerId;
-            });
-            count = validDebtors.length;
-          }
-          if (count === 0) return 0;
-          return amount / count;
+          const share =
+            parseMoneyValue(exp.customShares?.[targetId]) ||
+            parseMoneyValue(
+              targetId === currentUserId ? exp.customShares?.me : 0,
+            );
+          return share > 0 ? [share] : [];
         }
+
+        const sharedSlots = (exp.sharedWith || [])
+          .map((id) => toRealId(id))
+          .filter(Boolean);
+        const billableSlots =
+          exp.type === "full"
+            ? sharedSlots.filter((id) => !payerIdSet.has(id))
+            : sharedSlots;
+
+        if (billableSlots.length === 0) return [];
+        const sharePerSlot = amount / billableSlots.length;
+        return billableSlots
+          .filter((id) => id === targetId)
+          .map(() => sharePerSlot);
       };
 
-      // CHỈ TÍNH TOÁN NẾU GIAO DỊCH NÀY TRỰC TIẾP GIỮA TÔI VÀ PERSON_ID
-      if (payerId === user.uid) {
-        // TÔI trả tiền -> Tính số suất của PersonId và nhân lên
-        const personSlots = exp.sharedWith.filter(
-          (id) => id === personId,
-        ).length;
-        if (personSlots > 0 && !settledBy.includes(personId)) {
-          balance += getShareOf(personId) * personSlots;
-        }
-      } else if (payerId === personId) {
-        // PERSON_ID trả tiền -> Tính số suất của TÔI và nhân lên
-        const mySlots = exp.sharedWith.filter((id) => id === user.uid).length;
-        if (mySlots > 0 && !settledBy.includes(user.uid)) {
-          balance -= getShareOf(user.uid) * mySlots;
-        }
+      const myPaid =
+        payerEntries.find((payer) => payer.id === currentUserId)?.amount || 0;
+      const personPaid =
+        payerEntries.find((payer) => payer.id === personId)?.amount || 0;
+
+      if (myPaid > 0 && !settledBy.has(personId)) {
+        const personShare = getShareSlots(personId).reduce(
+          (sum, share) => sum + share,
+          0,
+        );
+        balance += personShare * (myPaid / payerTotal);
+      }
+
+      if (personPaid > 0 && !settledBy.has(currentUserId)) {
+        const myShare = getShareSlots(currentUserId).reduce(
+          (sum, share) => sum + share,
+          0,
+        );
+        balance -= myShare * (personPaid / payerTotal);
       }
     });
 
@@ -5044,56 +5450,10 @@ export default function App() {
     let totalRec = 0;
     let totalPay = 0;
 
-    // Duyệt qua từng thành viên KHÁC trong nhóm
     people.forEach((p) => {
-      if (p.id === user.uid) return; // Bỏ qua chính mình
+      if (p.id === user.uid) return;
 
-      let bilateral = 0; // > 0: Họ nợ mình | < 0: Mình nợ họ
-
-      expenses.forEach((exp) => {
-        const amount = parseFloat(exp.amount);
-        const payerId = exp.payerId === "me" ? user.uid : exp.payerId;
-
-        // Helper tính phần tiền
-        const getShare = (uid) => {
-          if (exp.type === "custom")
-            return parseFloat(exp.customShares?.[uid] || 0);
-
-          let count = exp.sharedWith.length; // <--- BẠN ĐANG CÓ DÒNG NÀY
-
-          // --- HÃY DÁN ĐOẠN FIX VÀO NGAY SAU DÒNG TRÊN ---
-          if (exp.type === "full") {
-            const realPayerId = exp.payerId === "me" ? user?.uid : exp.payerId;
-            const validDebtors = exp.sharedWith.filter((id) => {
-              const realId = id === "me" ? user?.uid : id;
-              return realId !== realPayerId;
-            });
-            count = validDebtors.length;
-          }
-          if (count === 0) return 0;
-          // ------------------------------------------------
-
-          return amount / count;
-        };
-
-        // 1. TÔI trả tiền, P tham gia -> P nợ tôi (+) (Nhân theo số suất)
-        if (payerId === user.uid) {
-          const pSlots = exp.sharedWith.filter((id) => id === p.id).length;
-          if (pSlots > 0 && !exp.settledBy?.includes(p.id)) {
-            bilateral += getShare(p.id) * pSlots;
-          }
-        }
-
-        // 2. P trả tiền, TÔI tham gia -> Tôi nợ P (-) (Nhân theo số suất)
-        if (payerId === p.id) {
-          const mySlots = exp.sharedWith.filter((id) => id === user.uid).length;
-          if (mySlots > 0 && !exp.settledBy?.includes(user.uid)) {
-            bilateral -= getShare(user.uid) * mySlots;
-          }
-        }
-      });
-
-      // Cộng dồn riêng biệt (Không bù trừ)
+      const bilateral = calculateNetDebt(p.id);
       if (bilateral > 0) totalRec += bilateral;
       if (bilateral < 0) totalPay += Math.abs(bilateral);
     });
@@ -5164,30 +5524,43 @@ export default function App() {
     });
 
     expenses.forEach((exp) => {
-      const amount = parseFloat(exp.amount || 0);
+      const amount = parseMoneyValue(exp.amount);
       if (!Number.isFinite(amount) || amount <= 0) return;
 
-      const payerId = toRealId(exp.payerId) || exp.payerId;
-      const payerRow = ensureLedgerRow(payerId);
-      if (!payerRow) return;
+      const payerEntries = getExpensePayerEntries(exp, user.uid);
+      const payerTotal = payerEntries.reduce(
+        (sum, payer) => sum + payer.amount,
+        0,
+      );
+      if (payerTotal <= 0) return;
 
-      payerRow.paid += amount;
+      payerEntries.forEach((payer) => {
+        const payerRow = ensureLedgerRow(payer.id);
+        if (payerRow) payerRow.paid += payer.amount;
+      });
+
       const settledBy = new Set((exp.settledBy || []).map((id) => toRealId(id)));
+      const creditPayersForShare = (debtorId, share) => {
+        const debtorRow = ensureLedgerRow(debtorId);
+        if (!debtorRow) return;
+
+        debtorRow.share += share;
+        if (settledBy.has(debtorId)) return;
+
+        debtorRow.payable += share;
+        payerEntries.forEach((payer) => {
+          const payerRow = ensureLedgerRow(payer.id);
+          if (!payerRow) return;
+          payerRow.receivable += share * (payer.amount / payerTotal);
+        });
+      };
 
       if (exp.type === "custom") {
         Object.entries(exp.customShares || {}).forEach(([rawDebtorId, value]) => {
           const debtorId = toRealId(rawDebtorId);
-          const share = parseFloat(value || 0);
+          const share = parseMoneyValue(value);
           if (!debtorId || !Number.isFinite(share) || share <= 0) return;
-
-          const debtorRow = ensureLedgerRow(debtorId);
-          if (!debtorRow) return;
-
-          debtorRow.share += share;
-          if (debtorId !== payerId && !settledBy.has(debtorId)) {
-            payerRow.receivable += share;
-            debtorRow.payable += share;
-          }
+          creditPayersForShare(debtorId, share);
         });
         return;
       }
@@ -5195,23 +5568,17 @@ export default function App() {
       const sharedSlots = (exp.sharedWith || [])
         .map((id) => toRealId(id))
         .filter(Boolean);
+      const payerIdSet = new Set(payerEntries.map((payer) => payer.id));
       const billableSlots =
         exp.type === "full"
-          ? sharedSlots.filter((id) => id !== payerId)
+          ? sharedSlots.filter((id) => !payerIdSet.has(id))
           : sharedSlots;
 
       if (billableSlots.length === 0) return;
       const sharePerSlot = amount / billableSlots.length;
 
       billableSlots.forEach((debtorId) => {
-        const debtorRow = ensureLedgerRow(debtorId);
-        if (!debtorRow) return;
-
-        debtorRow.share += sharePerSlot;
-        if (debtorId !== payerId && !settledBy.has(debtorId)) {
-          payerRow.receivable += sharePerSlot;
-          debtorRow.payable += sharePerSlot;
-        }
+        creditPayersForShare(debtorId, sharePerSlot);
       });
     });
 
@@ -5327,30 +5694,43 @@ export default function App() {
     });
 
     groupExpenses.forEach((exp) => {
-      const amount = parseFloat(exp.amount || 0);
+      const amount = parseMoneyValue(exp.amount);
       if (!Number.isFinite(amount) || amount <= 0) return;
 
-      const payerId = toRealId(exp.payerId) || exp.payerId;
-      const payerRow = ensureLedgerRow(payerId);
-      if (!payerRow) return;
+      const payerEntries = getExpensePayerEntries(exp, user.uid);
+      const payerTotal = payerEntries.reduce(
+        (sum, payer) => sum + payer.amount,
+        0,
+      );
+      if (payerTotal <= 0) return;
 
-      payerRow.paid += amount;
+      payerEntries.forEach((payer) => {
+        const payerRow = ensureLedgerRow(payer.id);
+        if (payerRow) payerRow.paid += payer.amount;
+      });
+
       const settledBy = new Set((exp.settledBy || []).map((id) => toRealId(id)));
+      const creditPayersForShare = (debtorId, share) => {
+        const debtorRow = ensureLedgerRow(debtorId);
+        if (!debtorRow) return;
+
+        debtorRow.share += share;
+        if (settledBy.has(debtorId)) return;
+
+        debtorRow.payable += share;
+        payerEntries.forEach((payer) => {
+          const payerRow = ensureLedgerRow(payer.id);
+          if (!payerRow) return;
+          payerRow.receivable += share * (payer.amount / payerTotal);
+        });
+      };
 
       if (exp.type === "custom") {
         Object.entries(exp.customShares || {}).forEach(([rawDebtorId, value]) => {
           const debtorId = toRealId(rawDebtorId);
-          const share = parseFloat(value || 0);
+          const share = parseMoneyValue(value);
           if (!debtorId || !Number.isFinite(share) || share <= 0) return;
-
-          const debtorRow = ensureLedgerRow(debtorId);
-          if (!debtorRow) return;
-
-          debtorRow.share += share;
-          if (debtorId !== payerId && !settledBy.has(debtorId)) {
-            payerRow.receivable += share;
-            debtorRow.payable += share;
-          }
+          creditPayersForShare(debtorId, share);
         });
         return;
       }
@@ -5358,23 +5738,17 @@ export default function App() {
       const sharedSlots = (exp.sharedWith || [])
         .map((id) => toRealId(id))
         .filter(Boolean);
+      const payerIdSet = new Set(payerEntries.map((payer) => payer.id));
       const billableSlots =
         exp.type === "full"
-          ? sharedSlots.filter((id) => id !== payerId)
+          ? sharedSlots.filter((id) => !payerIdSet.has(id))
           : sharedSlots;
 
       if (billableSlots.length === 0) return;
       const sharePerSlot = amount / billableSlots.length;
 
       billableSlots.forEach((debtorId) => {
-        const debtorRow = ensureLedgerRow(debtorId);
-        if (!debtorRow) return;
-
-        debtorRow.share += sharePerSlot;
-        if (debtorId !== payerId && !settledBy.has(debtorId)) {
-          payerRow.receivable += sharePerSlot;
-          debtorRow.payable += sharePerSlot;
-        }
+        creditPayersForShare(debtorId, sharePerSlot);
       });
     });
 
@@ -5452,7 +5826,7 @@ export default function App() {
           ? rawLabel
           : rawLabel?.name || rawLabel?.address || "Khoản chi";
       const key = normalizeName(label) || `expense:${exp.id}`;
-      const payerId = exp.payerId === "me" ? user?.uid : exp.payerId;
+      const payerEntries = getExpensePayerEntries(exp, user?.uid);
       const currentPoint = pointMap.get(key) || {
         id: key,
         name: label,
@@ -5468,13 +5842,15 @@ export default function App() {
         currentPoint.lastDate = exp.date;
       }
 
-      const payerName =
-        payerNameById.get(payerId) ||
-        (payerId === user?.uid ? "Bạn" : "Thành viên");
-      currentPoint.payers.set(
-        payerName,
-        (currentPoint.payers.get(payerName) || 0) + amount,
-      );
+      payerEntries.forEach((payer) => {
+        const payerName =
+          payerNameById.get(payer.id) ||
+          (payer.id === user?.uid ? "Bạn" : "Thành viên");
+        currentPoint.payers.set(
+          payerName,
+          (currentPoint.payers.get(payerName) || 0) + payer.amount,
+        );
+      });
       pointMap.set(key, currentPoint);
     });
 
@@ -6222,12 +6598,12 @@ export default function App() {
 
     // Helper: Kiểm tra xem giao dịch này có phải do "Mình" trả không
     // Chấp nhận cả ID thật và chữ "me" (tương thích dữ liệu cũ)
-    const isPayerMe = (payerId) => payerId === user.uid || payerId === "me";
+    const isPaidByMe = (expense) => isExpensePaidBy(expense, user.uid, user.uid);
 
     // 1. Tìm tất cả các khoản họ đang nợ mình
     const pendingExpenses = expenses.filter(
       (e) =>
-        isPayerMe(e.payerId) && // Mình trả tiền
+        isPaidByMe(e) && // Mình có ứng tiền
         e.sharedWith.includes(targetPerson.id) && // Họ có tham gia
         !e.settledBy?.includes(targetPerson.id), // Họ chưa trả
     );
@@ -6253,7 +6629,7 @@ export default function App() {
           // 3. Cập nhật trạng thái "đã trả" (settledBy)
           const updatedExpenses = expenses.map((e) => {
             if (
-              isPayerMe(e.payerId) &&
+              isPaidByMe(e) &&
               e.sharedWith.includes(targetPerson.id) &&
               !e.settledBy?.includes(targetPerson.id)
             ) {
@@ -6384,7 +6760,10 @@ export default function App() {
   const deletePerson = (id) => {
     const targetPerson = people.find((p) => p.id === id);
     const relatedExpenses = expenses.filter(
-      (e) => e.payerId === id || (e.sharedWith || []).includes(id),
+      (e) =>
+        e.payerId === id ||
+        (e.sharedWith || []).includes(id) ||
+        getExpensePayerEntries(e, user?.uid).some((payer) => payer.id === id),
     );
 
     if (relatedExpenses.length > 0) {
@@ -6577,6 +6956,20 @@ export default function App() {
     // [BƯỚC QUAN TRỌNG]: Dịch tất cả chữ "me" thành UID thật của máy đang dùng trước khi lưu
     const realUid = user.uid;
     let cleanData = { ...expenseData };
+
+    if (Array.isArray(cleanData.payers)) {
+      cleanData.payers = cleanData.payers
+        .map((payer) => ({
+          ...payer,
+          id: payer.id === "me" ? realUid : payer.id,
+          amount: parseMoneyValue(payer.amount),
+        }))
+        .filter((payer) => payer.id && payer.amount > 0);
+
+      if (cleanData.payers.length > 0) {
+        cleanData.payerId = cleanData.payers[0].id;
+      }
+    }
 
     if (cleanData.payerId === "me") cleanData.payerId = realUid;
 
@@ -7213,12 +7606,12 @@ export default function App() {
                 <div className="space-y-4">
                   <div className="grid grid-cols-3 gap-2 md:gap-3">
                     <div className="sm-ledger-metric">
-                      <span>Đã ứng</span>
+                      <span>Tổng chi</span>
                       <strong>{formatCompactCurrency(ledger.totalPaid)}</strong>
                     </div>
                     <div className="sm-ledger-metric">
-                      <span>Cần góp</span>
-                      <strong>{formatCompactCurrency(ledger.totalShare)}</strong>
+                      <span>Số tuyến</span>
+                      <strong>{allTransfers.length}</strong>
                     </div>
                     <div className="sm-ledger-metric">
                       <span>Còn lệch</span>
@@ -7591,7 +7984,8 @@ export default function App() {
             ? [...expenses]
                 .filter(
                   (e) =>
-                    e.payerId === user?.uid || e.sharedWith.includes(user?.uid),
+                    isExpensePaidBy(e, user?.uid, user?.uid) ||
+                    (e.sharedWith || []).includes(user?.uid),
                 )
                 .sort(
                   (a, b) =>
@@ -8361,10 +8755,9 @@ export default function App() {
                             const debt = p.amount || 0;
                             const related = globalHistory.filter(
                               (e) =>
-                                ((e.payerId === user?.uid ||
-                                  e.payerId === "me") &&
+                                (isExpensePaidBy(e, user?.uid, user?.uid) &&
                                   (e.sharedWith || []).includes(p.id)) ||
-                                (e.payerId === p.id &&
+                                (isExpensePaidBy(e, p.id, user?.uid) &&
                                   ((e.sharedWith || []).includes(user?.uid) ||
                                     (e.sharedWith || []).includes("me"))),
                             );
@@ -9165,15 +9558,15 @@ export default function App() {
 
                           <div className="grid grid-cols-3 gap-2 mb-4">
                             <div className="sm-ledger-metric">
-                              <span>Đã ứng</span>
+                              <span>Tổng chi</span>
                               <strong>
                                 {formatCompactCurrency(groupLedger.totalPaid)}
                               </strong>
                             </div>
                             <div className="sm-ledger-metric">
-                              <span>Phải góp</span>
+                              <span>Số tuyến</span>
                               <strong>
-                                {formatCompactCurrency(groupLedger.totalShare)}
+                                {groupLedger.settlementSuggestions.length}
                               </strong>
                             </div>
                             <div className="sm-ledger-metric">
@@ -9322,7 +9715,7 @@ export default function App() {
                               {expenses
                                 .filter(
                                   (exp) =>
-                                    exp.payerId === user?.uid ||
+                                    isExpensePaidBy(exp, user?.uid, user?.uid) ||
                                     exp.sharedWith.includes(user?.uid),
                                 )
                                 .sort(
@@ -9440,10 +9833,10 @@ export default function App() {
                       // 3. Lọc đúng giao dịch liên quan (CHỈ LẤY KHOẢN CHƯA TRẢ TIỀN)
                       const related = sourceExpenses.filter((e) => {
                         const iPaid =
-                          (e.payerId === user?.uid || e.payerId === "me") &&
+                          isExpensePaidBy(e, user?.uid, user?.uid) &&
                           (e.sharedWith || []).includes(p.id);
                         const theyPaid =
-                          e.payerId === p.id &&
+                          isExpensePaidBy(e, p.id, user?.uid) &&
                           ((e.sharedWith || []).includes(user?.uid) ||
                             (e.sharedWith || []).includes("me"));
 
@@ -9920,11 +10313,11 @@ export default function App() {
                           const related = globalHistory.filter((e) => {
                             // TÔI trả tiền, NÓ tham gia
                             const iPaid =
-                              (e.payerId === user?.uid || e.payerId === "me") &&
+                              isExpensePaidBy(e, user?.uid, user?.uid) &&
                               (e.sharedWith || []).includes(p.id);
                             // NÓ trả tiền, TÔI tham gia
                             const theyPaid =
-                              e.payerId === p.id &&
+                              isExpensePaidBy(e, p.id, user?.uid) &&
                               ((e.sharedWith || []).includes(user?.uid) ||
                                 (e.sharedWith || []).includes("me"));
 
@@ -10346,10 +10739,10 @@ export default function App() {
                           // Lọc lịch sử: Chỉ lấy các khoản CHƯA TRẢ TIỀN
                           const related = expenses.filter((e) => {
                             const iPaid =
-                              (e.payerId === user?.uid || e.payerId === "me") &&
+                              isExpensePaidBy(e, user?.uid, user?.uid) &&
                               (e.sharedWith || []).includes(p.id);
                             const theyPaid =
-                              e.payerId === p.id &&
+                              isExpensePaidBy(e, p.id, user?.uid) &&
                               ((e.sharedWith || []).includes(user?.uid) ||
                                 (e.sharedWith || []).includes("me"));
 
@@ -10765,7 +11158,7 @@ export default function App() {
                           {expenses
                             .filter(
                               (exp) =>
-                                exp.payerId === user?.uid ||
+                                isExpensePaidBy(exp, user?.uid, user?.uid) ||
                                 exp.sharedWith.includes(user?.uid),
                             )
                             .sort(
