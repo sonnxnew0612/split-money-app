@@ -43,6 +43,7 @@ import {
   UserMinus,
   Link,
   Copy,
+  MapPin,
   Pen, // <----- THÊM CHỮ Pen VÀO ĐÂY
 } from "lucide-react";
 import appIcon from "./assets/icon.png";
@@ -302,7 +303,14 @@ const Avatar = ({ name, src, size = "md", className = "" }) => {
 
 // THÊM ĐOẠN NÀY LÊN TRÊN CÙNG
 const GroupItem = React.memo(
-  ({ group, isMobile, onSelectGroup, onEditGroup, onDeleteGroup }) => {
+  ({
+    group,
+    isMobile,
+    onSelectGroup,
+    onEditGroup,
+    onDeleteGroup,
+    onOpenDebtMap,
+  }) => {
     const [isSwiped, setIsSwiped] = React.useState(false);
     const itemRef = React.useRef(null);
 
@@ -410,6 +418,16 @@ const GroupItem = React.memo(
               {group.name}
             </p>
           </div>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onOpenDebtMap?.(group);
+            }}
+            className="sm-group-map-btn text-indigo-600 bg-indigo-50 p-2 rounded-xl shadow-sm hover:bg-indigo-100 active:scale-95 transition-all"
+            title="Xem sơ đồ nợ nhóm"
+          >
+            <ArrowRightLeft size={16} />
+          </button>
           <div className="text-gray-300 animate-pulse pl-2">
             <ChevronLeft size={16} strokeWidth={3} />
           </div>
@@ -445,7 +463,10 @@ const GroupItem = React.memo(
     );
   },
   (prevProps, nextProps) => {
-    return JSON.stringify(prevProps.group) === JSON.stringify(nextProps.group);
+    return (
+      JSON.stringify(prevProps.group) === JSON.stringify(nextProps.group) &&
+      prevProps.isMobile === nextProps.isMobile
+    );
   },
 );
 
@@ -3323,6 +3344,14 @@ export default function App() {
   const [tempName, setTempName] = useState("");
   const [tempEmail, setTempEmail] = useState("");
   const [debtMapScope, setDebtMapScope] = useState("all");
+  const [debtMapModal, setDebtMapModal] = useState({
+    isOpen: false,
+    group: null,
+    ledger: null,
+    tripPoints: [],
+    loading: false,
+    error: "",
+  });
 
   const [isMobileView, setIsMobileView] = useState(window.innerWidth < 768);
 
@@ -5239,6 +5268,230 @@ export default function App() {
     };
   }, [people, contacts, expenses, user, groupId]);
 
+  const buildDebtMapSnapshot = (groupPeople = [], groupExpenses = []) => {
+    if (!user) {
+      return {
+        rows: [],
+        settlementSuggestions: [],
+        totalPaid: 0,
+        totalShare: 0,
+      };
+    }
+
+    const ledgerMap = new Map();
+    const toRealId = (id) => (id === "me" ? user?.uid : id);
+    const currentDisplayName =
+      user?.displayName || user?.email?.split("@")[0] || "Tôi";
+    const getKnownMember = (id) =>
+      groupPeople.find((person) => toRealId(person.id) === id) ||
+      contacts.find((contact) => toRealId(contact.id) === id) ||
+      (id === user.uid
+        ? {
+            id: user.uid,
+            name: currentDisplayName,
+            email: user.email,
+            photoURL: user.photoURL,
+          }
+        : null);
+    const ensureLedgerRow = (rawId, fallback = {}) => {
+      const id = toRealId(rawId);
+      if (!id) return null;
+
+      if (!ledgerMap.has(id)) {
+        const known = getKnownMember(id) || fallback;
+        ledgerMap.set(id, {
+          id,
+          name:
+            known.name ||
+            known.displayName ||
+            known.email?.split("@")[0] ||
+            fallback.name ||
+            "Thành viên",
+          email: normalizeEmail(known.email || fallback.email || ""),
+          photoURL: known.photoURL || fallback.photoURL || "",
+          paid: 0,
+          share: 0,
+          receivable: 0,
+          payable: 0,
+        });
+      }
+
+      return ledgerMap.get(id);
+    };
+
+    groupPeople.forEach((person) => ensureLedgerRow(person.id, person));
+    ensureLedgerRow(user.uid, {
+      name: currentDisplayName,
+      email: user.email,
+      photoURL: user.photoURL,
+    });
+
+    groupExpenses.forEach((exp) => {
+      const amount = parseFloat(exp.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) return;
+
+      const payerId = toRealId(exp.payerId) || exp.payerId;
+      const payerRow = ensureLedgerRow(payerId);
+      if (!payerRow) return;
+
+      payerRow.paid += amount;
+      const settledBy = new Set((exp.settledBy || []).map((id) => toRealId(id)));
+
+      if (exp.type === "custom") {
+        Object.entries(exp.customShares || {}).forEach(([rawDebtorId, value]) => {
+          const debtorId = toRealId(rawDebtorId);
+          const share = parseFloat(value || 0);
+          if (!debtorId || !Number.isFinite(share) || share <= 0) return;
+
+          const debtorRow = ensureLedgerRow(debtorId);
+          if (!debtorRow) return;
+
+          debtorRow.share += share;
+          if (debtorId !== payerId && !settledBy.has(debtorId)) {
+            payerRow.receivable += share;
+            debtorRow.payable += share;
+          }
+        });
+        return;
+      }
+
+      const sharedSlots = (exp.sharedWith || [])
+        .map((id) => toRealId(id))
+        .filter(Boolean);
+      const billableSlots =
+        exp.type === "full"
+          ? sharedSlots.filter((id) => id !== payerId)
+          : sharedSlots;
+
+      if (billableSlots.length === 0) return;
+      const sharePerSlot = amount / billableSlots.length;
+
+      billableSlots.forEach((debtorId) => {
+        const debtorRow = ensureLedgerRow(debtorId);
+        if (!debtorRow) return;
+
+        debtorRow.share += sharePerSlot;
+        if (debtorId !== payerId && !settledBy.has(debtorId)) {
+          payerRow.receivable += sharePerSlot;
+          debtorRow.payable += sharePerSlot;
+        }
+      });
+    });
+
+    const rows = Array.from(ledgerMap.values())
+      .map((row) => ({
+        ...row,
+        net: row.receivable - row.payable,
+      }))
+      .filter(
+        (row) =>
+          row.paid !== 0 ||
+          row.share !== 0 ||
+          row.receivable !== 0 ||
+          row.payable !== 0,
+      )
+      .sort((a, b) => Math.abs(b.net) - Math.abs(a.net));
+
+    const creditors = rows
+      .filter((row) => row.net > 0)
+      .map((row) => ({ ...row, left: row.net }));
+    const debtors = rows
+      .filter((row) => row.net < 0)
+      .map((row) => ({ ...row, left: Math.abs(row.net) }));
+    const settlementSuggestions = [];
+    let debtorIndex = 0;
+    let creditorIndex = 0;
+
+    while (debtorIndex < debtors.length && creditorIndex < creditors.length) {
+      const debtor = debtors[debtorIndex];
+      const creditor = creditors[creditorIndex];
+      const amount = Math.min(debtor.left, creditor.left);
+
+      if (amount > 0.5) {
+        settlementSuggestions.push({
+          fromId: debtor.id,
+          fromName: debtor.name,
+          toId: creditor.id,
+          toName: creditor.name,
+          amount,
+        });
+      }
+
+      debtor.left -= amount;
+      creditor.left -= amount;
+      if (debtor.left <= 0.5) debtorIndex += 1;
+      if (creditor.left <= 0.5) creditorIndex += 1;
+    }
+
+    return {
+      rows,
+      settlementSuggestions,
+      totalPaid: rows.reduce((sum, row) => sum + row.paid, 0),
+      totalShare: rows.reduce((sum, row) => sum + row.share, 0),
+    };
+  };
+
+  const buildTripPoints = (groupExpenses = [], groupPeople = []) => {
+    const payerNameById = new Map(
+      groupPeople.map((person) => [person.id, person.name || "Thành viên"]),
+    );
+    const pointMap = new Map();
+
+    groupExpenses.forEach((exp) => {
+      const amount = parseFloat(exp.amount || 0);
+      if (!Number.isFinite(amount) || amount <= 0) return;
+
+      const rawLabel =
+        exp.placeName ||
+        exp.locationName ||
+        exp.location ||
+        exp.description ||
+        "Khoản chi";
+      const label =
+        typeof rawLabel === "string"
+          ? rawLabel
+          : rawLabel?.name || rawLabel?.address || "Khoản chi";
+      const key = normalizeName(label) || `expense:${exp.id}`;
+      const payerId = exp.payerId === "me" ? user?.uid : exp.payerId;
+      const currentPoint = pointMap.get(key) || {
+        id: key,
+        name: label,
+        amount: 0,
+        count: 0,
+        lastDate: exp.date || "",
+        payers: new Map(),
+      };
+
+      currentPoint.amount += amount;
+      currentPoint.count += 1;
+      if (exp.date && (!currentPoint.lastDate || exp.date > currentPoint.lastDate)) {
+        currentPoint.lastDate = exp.date;
+      }
+
+      const payerName =
+        payerNameById.get(payerId) ||
+        (payerId === user?.uid ? "Bạn" : "Thành viên");
+      currentPoint.payers.set(
+        payerName,
+        (currentPoint.payers.get(payerName) || 0) + amount,
+      );
+      pointMap.set(key, currentPoint);
+    });
+
+    return Array.from(pointMap.values())
+      .map((point) => {
+        const topPayer =
+          Array.from(point.payers.entries()).sort((a, b) => b[1] - a[1])[0]?.[0] ||
+          "Thành viên";
+        return {
+          ...point,
+          topPayer,
+        };
+      })
+      .sort((a, b) => b.amount - a.amount)
+      .slice(0, 8);
+  };
+
   const visibleDebtMapTransfers = useMemo(() => {
     const transfers = groupLedger.settlementSuggestions || [];
     if (!user || debtMapScope === "all") return transfers;
@@ -5271,6 +5524,81 @@ export default function App() {
     navigator.clipboard.writeText(lines.join("\n")).then(() => {
       showToast("Đã copy sơ đồ nợ!", "success");
     });
+  };
+
+  const getScopedDebtTransfers = (ledger = groupLedger) => {
+    const transfers = ledger?.settlementSuggestions || [];
+    if (!user || debtMapScope === "all") return transfers;
+    if (debtMapScope === "mine") {
+      return transfers.filter(
+        (item) => item.fromId === user.uid || item.toId === user.uid,
+      );
+    }
+    return transfers.filter(
+      (item) => item.fromId !== user.uid && item.toId !== user.uid,
+    );
+  };
+
+  const openDebtMapModal = async (group) => {
+    if (!group?.id) return;
+
+    setDebtMapScope("all");
+    setDebtMapModal({
+      isOpen: true,
+      group,
+      ledger: null,
+      tripPoints: [],
+      loading: true,
+      error: "",
+    });
+
+    try {
+      const groupSnap = await getDoc(doc(db, "groups", group.id));
+      if (!groupSnap.exists()) {
+        setDebtMapModal({
+          isOpen: true,
+          group,
+          ledger: null,
+          tripPoints: [],
+          loading: false,
+          error: "Nhóm này không còn tồn tại hoặc bạn chưa có quyền xem.",
+        });
+        return;
+      }
+
+      const groupData = groupSnap.data();
+      const groupPeople = Array.isArray(groupData.members)
+        ? groupData.members
+        : [];
+      const groupExpenses = Array.isArray(groupData.expenses)
+        ? groupData.expenses
+        : [];
+      const ledger = buildDebtMapSnapshot(groupPeople, groupExpenses);
+      const tripPoints = buildTripPoints(groupExpenses, groupPeople);
+
+      setDebtMapModal({
+        isOpen: true,
+        group: makeGroupInfo(group.id, { ...group, ...groupData }),
+        ledger,
+        tripPoints,
+        loading: false,
+        error: "",
+      });
+    } catch (error) {
+      console.error("Không thể mở sơ đồ nợ nhóm:", error);
+      setDebtMapModal({
+        isOpen: true,
+        group,
+        ledger: null,
+        tripPoints: [],
+        loading: false,
+        error: "Không thể tải sơ đồ nợ nhóm này.",
+      });
+    }
+  };
+
+  const closeDebtMapModal = () => {
+    setDebtMapModal((prev) => ({ ...prev, isOpen: false }));
   };
 
   const copyGroupLedger = () => {
@@ -6785,6 +7113,343 @@ export default function App() {
     );
   };
 
+  const renderDebtMapModal = () => {
+    if (!debtMapModal.isOpen) return null;
+
+    const ledger = debtMapModal.ledger;
+    const rows = ledger?.rows || [];
+    const allTransfers = ledger?.settlementSuggestions || [];
+    const scopedTransfers = getScopedDebtTransfers(ledger);
+    const totalVisibleAmount = scopedTransfers.reduce(
+      (sum, item) => sum + item.amount,
+      0,
+    );
+    const unsettledTotal =
+      rows.reduce((sum, row) => sum + Math.abs(row.net || 0), 0) / 2;
+    const mineCount = allTransfers.filter(
+      (item) => item.fromId === user?.uid || item.toId === user?.uid,
+    ).length;
+    const othersCount = allTransfers.filter(
+      (item) => item.fromId !== user?.uid && item.toId !== user?.uid,
+    ).length;
+    const filterOptions = [
+      { id: "all", label: "Tất cả", count: allTransfers.length },
+      { id: "mine", label: "Liên quan tôi", count: mineCount },
+      { id: "others", label: "Người khác", count: othersCount },
+    ];
+    const emptyText =
+      debtMapScope === "others"
+        ? "Không còn khoản riêng giữa những người khác sau khi bù trừ."
+        : debtMapScope === "mine"
+          ? "Không còn khoản nào liên quan tới bạn."
+          : "Nhóm này đang cân, chưa cần ai chuyển thêm.";
+    const copyModalDebtMap = () => {
+      if (scopedTransfers.length === 0) {
+        showToast("Không có tuyến nợ nào để copy.", "info");
+        return;
+      }
+
+      const lines = [
+        `Sơ đồ nợ - ${debtMapModal.group?.name || "Nhóm"}`,
+        ...scopedTransfers.map(
+          (item) =>
+            `- ${item.fromName} -> ${item.toName}: ${formatCurrency(
+              item.amount,
+            )}`,
+        ),
+      ];
+      navigator.clipboard.writeText(lines.join("\n")).then(() => {
+        showToast("Đã copy sơ đồ nợ nhóm!", "success");
+      });
+    };
+
+    return (
+      <div
+        className="sm-modal-backdrop fixed inset-0 z-[420] bg-black/65 flex items-center justify-center p-3 md:p-6 animate-fade-in"
+        onClick={closeDebtMapModal}
+      >
+        <div
+          className="sm-debt-modal bg-white w-full max-w-5xl max-h-[92dvh] rounded-[2rem] shadow-2xl overflow-hidden flex flex-col"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="sm-debt-modal-header p-5 md:p-6 border-b border-gray-100 flex items-start justify-between gap-4">
+            <div className="min-w-0 flex items-center gap-3">
+              <div className="w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center text-xl shrink-0">
+                {debtMapModal.group?.icon || <ArrowRightLeft size={22} />}
+              </div>
+              <div className="min-w-0">
+                <p className="text-[11px] font-black text-indigo-500 uppercase tracking-wider">
+                  Sơ đồ nợ nhóm
+                </p>
+                <h2 className="text-xl md:text-2xl font-black text-gray-900 truncate">
+                  {debtMapModal.group?.name || "Nhóm"}
+                </h2>
+                <p className="text-xs text-gray-400 font-bold truncate">
+                  ID: {debtMapModal.group?.id || "--"}
+                </p>
+              </div>
+            </div>
+            <button
+              onClick={closeDebtMapModal}
+              className="p-2 bg-gray-100 text-gray-500 hover:bg-gray-200 rounded-full transition-colors shrink-0"
+            >
+              <X size={20} />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 md:p-6 bg-slate-50/60">
+            {debtMapModal.loading ? (
+              <div className="min-h-[360px] flex flex-col items-center justify-center text-gray-400 gap-3">
+                <div className="w-10 h-10 border-4 border-indigo-100 border-t-indigo-500 rounded-full animate-spin" />
+                <p className="font-bold">Đang tải sơ đồ nợ nhóm...</p>
+              </div>
+            ) : debtMapModal.error ? (
+              <div className="min-h-[280px] flex flex-col items-center justify-center text-center gap-3">
+                <AlertTriangle size={36} className="text-rose-500" />
+                <p className="font-bold text-gray-700">{debtMapModal.error}</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)] gap-4 md:gap-5">
+                <div className="space-y-4">
+                  <div className="grid grid-cols-3 gap-2 md:gap-3">
+                    <div className="sm-ledger-metric">
+                      <span>Đã ứng</span>
+                      <strong>{formatCompactCurrency(ledger.totalPaid)}</strong>
+                    </div>
+                    <div className="sm-ledger-metric">
+                      <span>Cần góp</span>
+                      <strong>{formatCompactCurrency(ledger.totalShare)}</strong>
+                    </div>
+                    <div className="sm-ledger-metric">
+                      <span>Còn lệch</span>
+                      <strong>{formatCompactCurrency(unsettledTotal)}</strong>
+                    </div>
+                  </div>
+
+                  <div className="sm-debt-map-card bg-white p-4 rounded-[1.5rem] shadow-sm">
+                    <div className="flex items-start justify-between gap-3 mb-3">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <div className="sm-debt-map-icon">
+                            <ArrowRightLeft size={16} />
+                          </div>
+                          <h3 className="font-bold text-gray-800 text-sm uppercase">
+                            Tuyến chuyển tiền tối ưu
+                          </h3>
+                        </div>
+                        <p className="text-[11px] text-gray-400 mt-1">
+                          Bù trừ toàn nhóm để giảm số lần chuyển khoản.
+                        </p>
+                      </div>
+                      <button
+                        onClick={copyModalDebtMap}
+                        disabled={scopedTransfers.length === 0}
+                        className="shrink-0 flex items-center gap-1.5 px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-[11px] font-bold text-gray-600 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition-all active:scale-95 disabled:opacity-40"
+                      >
+                        <Copy size={14} /> Copy
+                      </button>
+                    </div>
+
+                    <div className="sm-debt-map-filters">
+                      {filterOptions.map((option) => (
+                        <button
+                          key={option.id}
+                          onClick={() => setDebtMapScope(option.id)}
+                          className={`sm-debt-map-filter ${
+                            debtMapScope === option.id
+                              ? "sm-debt-map-filter-active"
+                              : ""
+                          }`}
+                        >
+                          <span>{option.label}</span>
+                          <strong>{option.count}</strong>
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-2 mb-3">
+                      <div className="sm-ledger-metric">
+                        <span>Số tuyến</span>
+                        <strong>{scopedTransfers.length}</strong>
+                      </div>
+                      <div className="sm-ledger-metric">
+                        <span>Tổng chuyển</span>
+                        <strong>{formatCompactCurrency(totalVisibleAmount)}</strong>
+                      </div>
+                    </div>
+
+                    {scopedTransfers.length === 0 ? (
+                      <div className="sm-debt-map-empty">
+                        <CheckCircle2 size={18} />
+                        <span>{emptyText}</span>
+                      </div>
+                    ) : (
+                      <div className="space-y-2 max-h-[42vh] overflow-y-auto custom-scrollbar pr-1">
+                        {scopedTransfers.map((item, index) => {
+                          const isBetweenOthers =
+                            item.fromId !== user?.uid && item.toId !== user?.uid;
+                          return (
+                            <div
+                              key={`${item.fromId}-${item.toId}-${index}`}
+                              className="sm-debt-transfer-row"
+                            >
+                              <div className="sm-debt-transfer-person">
+                                <Avatar
+                                  name={
+                                    item.fromId === user?.uid
+                                      ? "Bạn"
+                                      : item.fromName
+                                  }
+                                  size="md"
+                                />
+                                <div className="min-w-0">
+                                  <p className="truncate">
+                                    {item.fromId === user?.uid
+                                      ? "Bạn"
+                                      : item.fromName}
+                                  </p>
+                                  <span>Trả</span>
+                                </div>
+                              </div>
+
+                              <div className="sm-debt-transfer-mid">
+                                <strong>
+                                  {formatCompactCurrency(item.amount)}
+                                </strong>
+                                <ArrowRightLeft size={15} />
+                              </div>
+
+                              <div className="sm-debt-transfer-person sm-debt-transfer-person-right">
+                                <div className="min-w-0 text-right">
+                                  <p className="truncate">
+                                    {item.toId === user?.uid
+                                      ? "Bạn"
+                                      : item.toName}
+                                  </p>
+                                  <span>Nhận</span>
+                                </div>
+                                <Avatar
+                                  name={
+                                    item.toId === user?.uid ? "Bạn" : item.toName
+                                  }
+                                  size="md"
+                                />
+                              </div>
+
+                              {isBetweenOthers && (
+                                <span className="sm-debt-transfer-badge">
+                                  Người khác
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="sm-trip-map-card bg-white p-4 rounded-[1.5rem] shadow-sm">
+                    <div className="flex items-center gap-2 mb-3">
+                      <div className="sm-debt-map-icon">
+                        <MapPin size={16} />
+                      </div>
+                      <div>
+                        <h3 className="font-bold text-gray-800 text-sm uppercase">
+                          Bản đồ chi tiêu
+                        </h3>
+                        <p className="text-[11px] text-gray-400">
+                          Tạm gom theo tên khoản chi/địa điểm đã nhập.
+                        </p>
+                      </div>
+                    </div>
+
+                    {debtMapModal.tripPoints.length === 0 ? (
+                      <div className="sm-debt-map-empty">
+                        <MapPin size={18} />
+                        <span>Chưa có điểm chi tiêu nào để hiển thị.</span>
+                      </div>
+                    ) : (
+                      <div className="sm-trip-route">
+                        {debtMapModal.tripPoints.map((point, index) => (
+                          <div
+                            key={point.id}
+                            className="sm-trip-point"
+                            style={{ "--point-index": index + 1 }}
+                          >
+                            <div className="sm-trip-pin">
+                              <MapPin size={15} />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <p className="font-black text-gray-800 text-sm truncate">
+                                {point.name}
+                              </p>
+                              <p className="text-[11px] text-gray-400 font-bold truncate">
+                                {point.count} khoản · ứng nhiều nhất:{" "}
+                                {point.topPayer}
+                              </p>
+                            </div>
+                            <strong className="text-sm text-indigo-600 shrink-0">
+                              {formatCompactCurrency(point.amount)}
+                            </strong>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {rows.length > 0 && (
+                    <div className="sm-ledger-card bg-white p-4 rounded-[1.5rem] shadow-sm">
+                      <h3 className="font-bold text-gray-800 text-sm uppercase mb-3">
+                        Bảng thu/nợ nhanh
+                      </h3>
+                      <div className="space-y-2 max-h-72 overflow-y-auto custom-scrollbar pr-1">
+                        {rows.map((row) => (
+                          <div key={row.id} className="sm-ledger-row">
+                            <div className="min-w-0">
+                              <p className="font-bold text-gray-800 text-sm truncate">
+                                {row.id === user?.uid ? "Bạn" : row.name}
+                              </p>
+                              <p className="text-[11px] text-gray-400 truncate">
+                                ứng {formatCompactCurrency(row.paid)} · góp{" "}
+                                {formatCompactCurrency(row.share)}
+                              </p>
+                            </div>
+                            <div className="text-right shrink-0">
+                              <span
+                                className={`sm-ledger-status ${
+                                  row.net > 0
+                                    ? "sm-ledger-status-positive"
+                                    : row.net < 0
+                                      ? "sm-ledger-status-negative"
+                                      : "sm-ledger-status-neutral"
+                                }`}
+                              >
+                                {row.net > 0
+                                  ? "Cần thu"
+                                  : row.net < 0
+                                    ? "Cần trả"
+                                    : "Đã cân"}
+                              </span>
+                              <p className="font-black text-sm text-gray-800 mt-1">
+                                {formatCompactCurrency(Math.abs(row.net))}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   const renderShareModal = () => {
     if (!sharingGroup) return null;
 
@@ -6887,6 +7552,7 @@ export default function App() {
         onConfirm={confirmDialog.onConfirm}
         onClose={() => setConfirmDialog((prev) => ({ ...prev, isOpen: false }))}
       />
+      {renderDebtMapModal()}
       <ExpenseModal
         isOpen={isModalOpen}
         onClose={() => {
@@ -7410,6 +8076,21 @@ export default function App() {
                   >
                     {g.name}
                   </p>
+                </div>
+
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    openDebtMapModal(g);
+                  }}
+                  className={`p-2 rounded-xl shrink-0 transition-all ${
+                    groupId === g.id
+                      ? "bg-white/15 text-white hover:bg-white/25"
+                      : "bg-indigo-50 text-indigo-600 hover:bg-indigo-100"
+                  }`}
+                  title="Xem sơ đồ nợ nhóm"
+                >
+                  <ArrowRightLeft size={15} />
                 </div>
 
                 {/* Cụm nút thao tác (Sửa/Xóa/Out) */}
@@ -8113,6 +8794,9 @@ export default function App() {
                                     onEditGroup={() => openRenameModal(group)}
                                     onDeleteGroup={() =>
                                       handleDeleteGroup(group.id)
+                                    }
+                                    onOpenDebtMap={() =>
+                                      openDebtMapModal(group)
                                     }
                                   />
                                 ))}

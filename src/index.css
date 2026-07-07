@@ -537,6 +537,76 @@ select {
   font-weight: 800;
 }
 
+.sm-group-map-btn {
+  border: 1px solid rgba(199, 210, 254, 0.82);
+}
+
+.sm-debt-modal {
+  border: 1px solid rgba(226, 232, 240, 0.82);
+}
+
+.sm-debt-modal-header {
+  background:
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.1), transparent 14rem),
+    #ffffff;
+}
+
+.sm-trip-map-card {
+  border: 1px solid var(--sm-line);
+}
+
+.sm-trip-route {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-radius: 22px;
+  background:
+    linear-gradient(135deg, rgba(238, 242, 255, 0.74), rgba(240, 253, 250, 0.68)),
+    radial-gradient(circle at 80% 14%, rgba(99, 102, 241, 0.16), transparent 9rem);
+  padding: 14px;
+  overflow: hidden;
+}
+
+.sm-trip-route::before {
+  position: absolute;
+  top: 26px;
+  bottom: 26px;
+  left: 29px;
+  width: 2px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, #818cf8, #14b8a6);
+  content: "";
+  opacity: 0.65;
+}
+
+.sm-trip-point {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.82);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.84);
+  padding: 10px 10px 10px 6px;
+  box-shadow: 0 10px 28px rgba(30, 41, 59, 0.06);
+}
+
+.sm-trip-pin {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #4f46e5;
+  color: #ffffff;
+  box-shadow: 0 8px 18px rgba(79, 70, 229, 0.22);
+  flex-shrink: 0;
+}
+
 .sm-modal-backdrop {
   background: rgba(15, 23, 42, 0.56) !important;
   backdrop-filter: blur(8px);
@@ -851,6 +921,50 @@ select {
     background: rgba(15, 23, 42, 0.64);
     border-color: var(--sm-line);
     color: #cbd5e1;
+  }
+
+  .sm-group-map-btn {
+    background: rgba(79, 70, 229, 0.2) !important;
+    border-color: rgba(129, 140, 248, 0.32);
+    color: #c4b5fd !important;
+  }
+
+  .sm-debt-modal {
+    background-color: rgba(17, 24, 39, 0.98) !important;
+    border-color: var(--sm-line);
+  }
+
+  .sm-debt-modal-header {
+    background:
+      radial-gradient(circle at top right, rgba(129, 140, 248, 0.16), transparent 14rem),
+      rgba(17, 24, 39, 0.98) !important;
+    border-color: var(--sm-line) !important;
+  }
+
+  .sm-trip-map-card {
+    background-color: rgba(17, 24, 39, 0.92) !important;
+    border-color: var(--sm-line);
+  }
+
+  .sm-trip-route {
+    background:
+      linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.78)),
+      radial-gradient(circle at 80% 14%, rgba(129, 140, 248, 0.16), transparent 9rem);
+  }
+
+  .sm-trip-route::before {
+    background: linear-gradient(180deg, #a78bfa, #2dd4bf);
+  }
+
+  .sm-trip-point {
+    background: rgba(15, 23, 42, 0.72);
+    border-color: var(--sm-line);
+    box-shadow: none;
+  }
+
+  .sm-trip-pin {
+    background: #8b5cf6;
+    box-shadow: 0 8px 18px rgba(139, 92, 246, 0.2);
   }
 }
 
