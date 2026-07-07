@@ -3753,9 +3753,15 @@ export default function App() {
     const emailB = normalizeEmail(b.email);
     return a.id === b.id || (!!emailA && emailA === emailB);
   };
-  const dedupeContacts = (list) => {
+  const dedupeContacts = (list = []) => {
+    const contactList = Array.isArray(list)
+      ? list
+      : list && typeof list === "object"
+        ? Object.values(list)
+        : [];
     const seen = new Set();
-    return list.filter((contact) => {
+    return contactList.filter((contact) => {
+      if (!contact) return false;
       const key =
         normalizeEmail(contact.email) ||
         contact.id ||
@@ -3827,7 +3833,15 @@ export default function App() {
     const userRef = doc(db, "users", uid);
     const userSnap = await getDoc(userRef);
     const userData = userSnap.exists() ? userSnap.data() : {};
-    const currentList = Array.isArray(userData[field]) ? userData[field] : [];
+    const rawList = userData[field];
+    const currentList =
+      field === "joinedGroups"
+        ? normalizeGroupList(rawList || [])
+        : field === "contacts"
+          ? normalizeContactList(rawList || [])
+          : Array.isArray(rawList)
+            ? rawList
+            : [];
     const nextList = updater(currentList, userData);
     await setDoc(userRef, { [field]: nextList }, { merge: true });
     return nextList;
