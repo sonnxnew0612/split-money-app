@@ -3322,6 +3322,7 @@ export default function App() {
   const [tempMembers, setTempMembers] = useState([]); // Danh sách người chờ thêm khi tạo nhóm
   const [tempName, setTempName] = useState("");
   const [tempEmail, setTempEmail] = useState("");
+  const [debtMapScope, setDebtMapScope] = useState("all");
 
   const [isMobileView, setIsMobileView] = useState(window.innerWidth < 768);
 
@@ -5238,6 +5239,40 @@ export default function App() {
     };
   }, [people, contacts, expenses, user, groupId]);
 
+  const visibleDebtMapTransfers = useMemo(() => {
+    const transfers = groupLedger.settlementSuggestions || [];
+    if (!user || debtMapScope === "all") return transfers;
+    if (debtMapScope === "mine") {
+      return transfers.filter(
+        (item) => item.fromId === user.uid || item.toId === user.uid,
+      );
+    }
+    return transfers.filter(
+      (item) => item.fromId !== user.uid && item.toId !== user.uid,
+    );
+  }, [groupLedger.settlementSuggestions, debtMapScope, user]);
+
+  const copyDebtMap = () => {
+    const groupName = myGroups.find((g) => g.id === groupId)?.name || "Nhóm";
+    const transfers = visibleDebtMapTransfers;
+
+    if (transfers.length === 0) {
+      showToast("Không có tuyến nợ nào trong bộ lọc này.", "info");
+      return;
+    }
+
+    const lines = [`Sơ đồ nợ tối ưu - ${groupName}`];
+    transfers.forEach((item) => {
+      lines.push(
+        `- ${item.fromName} -> ${item.toName}: ${formatCurrency(item.amount)}`,
+      );
+    });
+
+    navigator.clipboard.writeText(lines.join("\n")).then(() => {
+      showToast("Đã copy sơ đồ nợ!", "success");
+    });
+  };
+
   const copyGroupLedger = () => {
     if (groupLedger.rows.length === 0) {
       showToast("Chưa có dữ liệu thu/nợ để copy!", "info");
@@ -6599,6 +6634,157 @@ export default function App() {
   };
 
   // --- COMPONENT POPUP CHIA SẺ (CHỈ HIỆN MÃ NHÓM) ---
+  const renderDebtMapCard = ({ compact = false } = {}) => {
+    if (!groupId || groupLedger.rows.length === 0) return null;
+
+    const allTransfers = groupLedger.settlementSuggestions || [];
+    const mineCount = allTransfers.filter(
+      (item) => item.fromId === user?.uid || item.toId === user?.uid,
+    ).length;
+    const othersCount = allTransfers.filter(
+      (item) => item.fromId !== user?.uid && item.toId !== user?.uid,
+    ).length;
+    const filterOptions = [
+      { id: "all", label: "Tất cả", count: allTransfers.length },
+      { id: "mine", label: "Liên quan tôi", count: mineCount },
+      { id: "others", label: "Người khác", count: othersCount },
+    ];
+    const totalVisibleAmount = visibleDebtMapTransfers.reduce(
+      (sum, item) => sum + item.amount,
+      0,
+    );
+    const getLedgerPerson = (id, fallbackName) =>
+      groupLedger.rows.find((row) => row.id === id) || {
+        id,
+        name: fallbackName,
+        photoURL: "",
+      };
+    const emptyText =
+      debtMapScope === "others"
+        ? "Không còn khoản nợ riêng giữa những người khác sau khi bù trừ."
+        : debtMapScope === "mine"
+          ? "Không còn khoản nào cần chuyển liên quan tới bạn."
+          : "Nhóm này đang cân, chưa cần ai chuyển thêm.";
+
+    return (
+      <div className="sm-debt-map-card bg-white p-4 rounded-[1.5rem] shadow-sm shrink-0">
+        <div className="flex items-start justify-between gap-3 mb-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <div className="sm-debt-map-icon">
+                <ArrowRightLeft size={16} />
+              </div>
+              <h3 className="font-bold text-gray-800 text-sm uppercase">
+                Sơ đồ nợ
+              </h3>
+            </div>
+            <p className="text-[11px] text-gray-400 mt-1">
+              Tối ưu sau bù trừ, xem được cả khoản người khác trả cho nhau.
+            </p>
+          </div>
+          <button
+            onClick={copyDebtMap}
+            disabled={visibleDebtMapTransfers.length === 0}
+            className="shrink-0 flex items-center gap-1.5 px-3 py-2 bg-gray-50 border border-gray-200 rounded-xl text-[11px] font-bold text-gray-600 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Copy size={14} /> Copy
+          </button>
+        </div>
+
+        <div className="sm-debt-map-filters">
+          {filterOptions.map((option) => (
+            <button
+              key={option.id}
+              onClick={() => setDebtMapScope(option.id)}
+              className={`sm-debt-map-filter ${
+                debtMapScope === option.id ? "sm-debt-map-filter-active" : ""
+              }`}
+            >
+              <span>{option.label}</span>
+              <strong>{option.count}</strong>
+            </button>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 mb-3">
+          <div className="sm-ledger-metric">
+            <span>Số tuyến</span>
+            <strong>{visibleDebtMapTransfers.length}</strong>
+          </div>
+          <div className="sm-ledger-metric">
+            <span>Tổng chuyển</span>
+            <strong>{formatCompactCurrency(totalVisibleAmount)}</strong>
+          </div>
+        </div>
+
+        {visibleDebtMapTransfers.length === 0 ? (
+          <div className="sm-debt-map-empty">
+            <CheckCircle2 size={18} />
+            <span>{emptyText}</span>
+          </div>
+        ) : (
+          <div
+            className={`space-y-2 ${
+              compact ? "" : "max-h-72 overflow-y-auto custom-scrollbar pr-1"
+            }`}
+          >
+            {visibleDebtMapTransfers.map((item, index) => {
+              const fromPerson = getLedgerPerson(item.fromId, item.fromName);
+              const toPerson = getLedgerPerson(item.toId, item.toName);
+              const fromLabel =
+                item.fromId === user?.uid ? "Bạn" : item.fromName;
+              const toLabel = item.toId === user?.uid ? "Bạn" : item.toName;
+              const isBetweenOthers =
+                item.fromId !== user?.uid && item.toId !== user?.uid;
+
+              return (
+                <div
+                  key={`${item.fromId}-${item.toId}-${index}`}
+                  className="sm-debt-transfer-row"
+                >
+                  <div className="sm-debt-transfer-person">
+                    <Avatar
+                      name={fromLabel}
+                      src={fromPerson.photoURL}
+                      size={compact ? "sm" : "md"}
+                      className="shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <p className="truncate">{fromLabel}</p>
+                      <span>Trả</span>
+                    </div>
+                  </div>
+
+                  <div className="sm-debt-transfer-mid">
+                    <strong>{formatCompactCurrency(item.amount)}</strong>
+                    <ArrowRightLeft size={15} />
+                  </div>
+
+                  <div className="sm-debt-transfer-person sm-debt-transfer-person-right">
+                    <div className="min-w-0 text-right">
+                      <p className="truncate">{toLabel}</p>
+                      <span>Nhận</span>
+                    </div>
+                    <Avatar
+                      name={toLabel}
+                      src={toPerson.photoURL}
+                      size={compact ? "sm" : "md"}
+                      className="shrink-0"
+                    />
+                  </div>
+
+                  {isBetweenOthers && (
+                    <span className="sm-debt-transfer-badge">Người khác</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderShareModal = () => {
     if (!sharingGroup) return null;
 
@@ -8419,6 +8605,8 @@ export default function App() {
                       )}
 
                       {/* LỊCH SỬ GIAO DỊCH (SCROLL TỰ NHIÊN) */}
+                      {renderDebtMapCard({ compact: true })}
+
                       <div className="bg-white p-4 rounded-[1.5rem] shadow-sm shrink-0 flex flex-col mb-4">
                         <div className="flex justify-between items-center mb-4 px-1 shrink-0">
                           <h3 className="font-bold text-gray-700 text-[11px] uppercase">
@@ -9866,6 +10054,8 @@ export default function App() {
                       </div>
 
                       {/* Lịch sử giao dịch */}
+                      {renderDebtMapCard()}
+
                       <div className="flex-1 bg-white rounded-2xl shadow-sm border border-gray-200 flex flex-col min-h-0 overflow-hidden">
                         <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50/50">
                           <h2 className="font-bold text-gray-800 flex items-center gap-2 text-base">
